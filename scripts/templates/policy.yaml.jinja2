@@ -1,0 +1,16 @@
+type: Microsoft.Network/firewallPolicies
+apiVersion: 2023-11-01
+location: westeurope
+tags:
+  scope: Azure Firewall Enviroment
+  team: Network
+  Role: Network management
+properties:
+  basePolicy: {{ base_policy }}
+  sku:
+    tier: Premium
+  threatIntelMode: Alert
+  dnsSettings:
+    servers: []
+    enableProxy: true
+terms: []

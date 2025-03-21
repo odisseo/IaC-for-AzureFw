@@ -1,0 +1,10 @@
+pip>=25.0.1
+# csv
+jinja2
+# os
+datetime
+logging
+sys
+pyyaml>=6.0
+shutil
+stat

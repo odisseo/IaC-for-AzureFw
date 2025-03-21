@@ -1,0 +1,10 @@
+PolicyName;ParentPolicy;RuleCollectionGroup;RuleCollectionGroupPriority;RuleCollection;RuleCollectionPriority;RuleCollectionType;RuleCollectionAction;RuleName;RuleType;IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;DestinationFqdns;DestinationPorts;Notes
+{% for resource in resources -%}
+{% if resource.type == 'Microsoft.Network/firewallPolicies/ruleCollectionGroups' -%}
+{% for ruleCollection in resource.properties.ruleCollections -%}
+{% for rule in ruleCollection.rules -%}
+{{ resource.name.split('/')[0] }};{{ resource.policyParent }};{{ resource.name.split('/')[1] }};{{ resource.properties.priority }};{{ ruleCollection.name }};{{ ruleCollection.priority }};{{ ruleCollection.ruleCollectionType }};{{ ruleCollection.action.type }};{{ rule.name }};{{ rule.ruleType }};{{ ','.join(rule.ipProtocols) }};{{ ','.join(rule.sourceAddresses) }};{{ ','.join(rule.sourceIpGroups | map('replace', "[resourceId('Microsoft.Network/ipGroups', '", '') | map('replace', "')]", '')) }};{{ ','.join(rule.destinationAddresses) }};{{ ','.join(rule.destinationIpGroups | map('replace', "[resourceId('Microsoft.Network/ipGroups', '", '') | map('replace', "')]", '')) }};{{ ','.join(rule.destinationFqdns) }};{{ ','.join(rule.destinationPorts) }};{{ rule.notes }};
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
+{% endfor -%}

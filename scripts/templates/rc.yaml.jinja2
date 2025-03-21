@@ -1,0 +1,38 @@
+ruleCollectionType: {{ rule_collection_type }}
+action: {{ action }}
+rules:
+
+{% for rule in rules -%}
+  - name: {{ rule.name }}
+  ruleType: {{ rule.ruleType }}  
+  ipProtocols:
+{%- for protocol in rule.ipProtocols %}
+  - "{{ protocol }}"
+{%- endfor %}
+  sourceAddresses:
+{%- for address in rule.sourceAddresses %}
+  - "{{ address }}"
+{%- endfor %}
+  sourceIpGroups:
+{%- for ip_group in rule.sourceIpGroups %}
+  - "{{ ip_group }}"
+{%- endfor %}
+  destinationAddresses:
+{%- for address in rule.destinationAddresses %}
+  - "{{ address }}"
+{%- endfor %}
+  destinationIpGroups:
+{%- for ip_group in rule.destinationIpGroups %}
+  - "{{ ip_group }}"
+{%- endfor %}
+  destinationFqdns:
+{%- for fqdn in rule.destinationFqdns %}
+  - "{{ fqdn }}"
+{%- endfor %}
+  destinationPorts:
+{%- for port in rule.destinationPorts %}
+  - "{{ port }}"
+{%- endfor %}
+
+{% endfor -%}
+terms: []

@@ -1,0 +1,170 @@
+{% set ip_groups = [] -%}
+
+{# PRIMA PASSATA: raccogliamo i nomi degli IP Groups #}
+{% for policy_name, policy_data in policies.items() -%}
+  {% for rcg_name, rcg_data in policy_data["rcgs"].items() -%}
+    {% for rc_name, rc_data in rcg_data["ruleCollections"].items() -%}
+      {% for rule in rc_data["rules"] -%}
+        {% if rule["SourceIpGroups"] -%}
+          {% for group in rule["SourceIpGroups"].split(',') -%}
+            {% if group.strip() and group.strip() not in ip_groups -%}
+              {% set _ = ip_groups.append(group.strip()) -%}
+            {% endif -%}
+          {% endfor -%}
+        {% endif -%}
+        {% if rule["DestinationIpGroups"] -%}
+          {% for group in rule["DestinationIpGroups"].split(',') -%}
+            {% if group.strip() and group.strip() not in ip_groups -%}
+              {% set _ = ip_groups.append(group.strip()) -%}
+            {% endif -%}
+          {% endfor -%}
+        {% endif -%}
+      {% endfor -%}
+    {% endfor -%}
+  {% endfor -%}
+{% endfor -%}
+
+{# STAMPIAMO PRIMA I PARAMETRI #}
+{% for ip_group in ip_groups | unique -%}
+{% set ipGroupName = ip_group -%}
+{% set ipGroupVariable = ipGroupName | replace('-', '_') | replace('.', '_') -%}
+{# {% set ipGroupResourceId = "/subscriptions/1094279d-0d07-49dd-8a45-36af71ae2bc0/resourceGroups/SecInt-Network-AzureFirewall-IaC-IPG-RG/providers/Microsoft.Network/ipGroups/" + ipGroupName -%} #}
+{% set ipGroupResourceId = "/subscriptions/" + subscriptionid + "/resourceGroups/" + ipgrouprg + "/providers/Microsoft.Network/ipGroups/" + ipGroupName -%}
+param {{ ipGroupVariable }} string = '{{ ipGroupResourceId }}'
+{% endfor -%}
+
+{# SECONDA PASSATA: Generiamo le risorse delle policy #}
+{% for policy_name, policy_data in policies.items() -%}
+{% set policy_name_with_date = policy_name -%}
+
+resource {{ policy_name_with_date | replace('-', '_') | replace('.', '_') }} 'Microsoft.Network/firewallPolicies@2024-03-01' = {
+  name: '{{ policy_name_with_date }}'
+  location: 'westeurope'
+  properties: {
+    sku: {
+      tier: 'Premium'
+    }
+    threatIntelMode: 'Alert'
+    dnsSettings: {
+      servers: []
+      enableProxy: true
+    }
+    {% if policy_data["basePolicy"] -%}
+    basePolicy: {
+      {% set firewallPolicyResourceId = "/subscriptions/" + subscriptionid + "/resourceGroups/" + policiesrg + "/providers/Microsoft.Network/firewallPolicies/" + policy_data["basePolicy"] + "_" + policy_data["date_suffix"] -%}
+      id: '{{ firewallPolicyResourceId }}'
+    }
+    {% endif -%}
+  }
+  dependsOn: [
+    {% if policy_data["basePolicy"] -%}
+    {{ policy_data["basePolicy"] | replace('-', '_') | replace('.', '_') }}_{{ policy_data["date_suffix"] }}
+    {% if policy_data["basePolicyLastRcg"] -%}
+    {{ policy_data["basePolicyLastRcg"] | replace('-', '_') | replace('.', '_') }}
+    {% endif -%}
+    {% endif -%}
+  ]
+}
+
+{% for rcg_index in range(policy_data["rcg_order"] | length) -%}
+{% set rcg_name = policy_data["rcg_order"][rcg_index] -%}
+{% set rcg_data = policy_data["rcgs"][rcg_name] -%}
+
+resource {{ policy_name_with_date | replace('-', '_') | replace('.', '_') }}_{{ rcg_name | replace('-', '_') | replace('.', '_') }} 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@2024-03-01' = {
+  parent: {{ policy_name_with_date | replace('-', '_') | replace('.', '_') }}
+  name: '{{ rcg_name }}'
+  dependsOn: [
+    {{ policy_name_with_date | replace('-', '_') | replace('.', '_') }}
+    {% if rcg_index > 0 -%}{{ policy_name_with_date | replace('-', '_') | replace('.', '_') }}_{{ policy_data["rcg_order"][rcg_index - 1] | replace('-', '_') | replace('.', '_') }}{% endif -%}
+  ]
+  properties: {
+    priority: {{ rcg_data["RuleCollectionGroupPriority"] }}
+    ruleCollections: [
+      {% for rc_name, rc_data in rcg_data["ruleCollections"].items() -%}
+      {
+        name: '{{ rc_name }}'
+        priority: {{ rc_data["RuleCollectionPriority"] }}
+        ruleCollectionType: '{{ rc_data["rules"][0]["RuleCollectionType"] }}'
+        action: {
+          type: '{{ rc_data["rules"][0]["RuleCollectionAction"] }}'
+        }
+        rules: [
+          {% for rule in rc_data["rules"] -%}
+          {
+            ruleType: '{{ rule["RuleType"] }}'
+            name: '{{ rule["RuleName"] }}'
+            ipProtocols: [
+              {% if rule["IpProtocols"] -%}
+                {% for protocol in rule["IpProtocols"].split(',') -%}
+                  {% for sub_protocol in protocol.split(';') -%}
+                    '{{ sub_protocol.strip() }}'
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            sourceAddresses: [
+              {% if rule["SourceAddresses"] -%}
+                {% for address in rule["SourceAddresses"].split(',') -%}
+                  {% for sub_address in address.split(';') -%}
+                    '{{ sub_address.strip() }}'
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            sourceIpGroups: [
+              {% if rule["SourceIpGroups"] -%}
+                {% for group in rule["SourceIpGroups"].split(',') -%}
+                  {% for sub_group in group.split(';') -%}
+                    {{ sub_group.strip() | replace('-', '_') | replace('.', '_') }}
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            destinationAddresses: [
+              {% if rule["DestinationAddresses"] -%}
+                {% for address in rule["DestinationAddresses"].split(',') -%}
+                  {% for sub_address in address.split(';') -%}
+                    '{{ sub_address.strip() }}'
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            destinationIpGroups: [
+              {% if rule["DestinationIpGroups"] -%}
+                {% for group in rule["DestinationIpGroups"].split(',') -%}
+                  {% for sub_group in group.split(';') -%}
+                    {{ sub_group.strip() | replace('-', '_') | replace('.', '_') }}
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            destinationFqdns: [
+              {% if rule["DestinationFqdns"] -%}
+                {% for fqdn in rule["DestinationFqdns"].split(',') -%}
+                  {% for sub_fqdn in fqdn.split(';') -%}
+                    '{{ sub_fqdn.strip() }}'
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+            destinationPorts: [
+              {% if rule["DestinationPorts"] -%}
+                {% for port in rule["DestinationPorts"].split(',') -%}
+                  {% for sub_port in port.split(';') -%}
+                    '{{ sub_port.strip() }}'
+                  {% endfor -%}
+                {% endfor -%}
+              {% endif -%}
+            ]
+          }
+          {% if not loop.last -%} {% endif -%}
+          {% endfor -%}
+        ]
+      }
+      {% if not loop.last %} {% endif -%}
+      {% endfor -%}
+    ]
+  }
+}
+{% endfor -%}
+{% endfor -%}
