@@ -1,4 +1,8 @@
 # Versions
+## V. 0.14 (20251306)
+- main script in the root
+- changed name of the bicep
+
 ## V. 0.13 (20250906)
 - new version of FIREWALL_DATA
 - folder for firewall yaml files
