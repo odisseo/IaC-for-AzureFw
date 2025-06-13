@@ -1,38 +1,107 @@
-ruleCollectionType: {{ rule_collection_type }}
-action: {{ action }}
+ruleCollectionType: '{{ rule_collection_type }}'
+action: '{{ action }}'
 rules:
 
 {% for rule in rules -%}
-  - name: {{ rule.name }}
-  ruleType: {{ rule.ruleType }}  
+  - name: '{{ rule.name }}'
+  ruleType: '{{ rule.ruleType }}'
+  {%- if rule.ruleType == "NatRule" %} # NatRule
   ipProtocols:
-{%- for protocol in rule.ipProtocols %}
-  - "{{ protocol }}"
-{%- endfor %}
+  {%- for protocol in rule.ipProtocols %}
+    - '{{ protocol }}'
+  {%- endfor %}
   sourceAddresses:
-{%- for address in rule.sourceAddresses %}
-  - "{{ address }}"
-{%- endfor %}
+  {%- for address in rule.sourceAddresses %}
+    - '{{ address }}'
+  {%- endfor %}
   sourceIpGroups:
-{%- for ip_group in rule.sourceIpGroups %}
-  - "{{ ip_group }}"
-{%- endfor %}
+  {%- for sourceIpGroup in rule.sourceIpGroups %}
+    - '{{ sourceIpGroup }}'
+  {%- endfor %}
   destinationAddresses:
-{%- for address in rule.destinationAddresses %}
-  - "{{ address }}"
-{%- endfor %}
-  destinationIpGroups:
-{%- for ip_group in rule.destinationIpGroups %}
-  - "{{ ip_group }}"
-{%- endfor %}
-  destinationFqdns:
-{%- for fqdn in rule.destinationFqdns %}
-  - "{{ fqdn }}"
-{%- endfor %}
+  {%- for destinationAddress in rule.destinationAddresses %}
+    - '{{ destinationAddress }}'
+  {%- endfor %}
   destinationPorts:
-{%- for port in rule.destinationPorts %}
-  - "{{ port }}"
-{%- endfor %}
-
-{% endfor -%}
+  {%- for destinationPort in rule.destinationPorts %}
+    - '{{ destinationPort }}'
+  {%- endfor %}
+  translatedAddress: '{{ rule.translatedAddress }}'
+  translatedFqdn: '{{ rule.translatedFqdn }}'
+  translatedPort: '{{ rule.translatedPort }}'
+  {% elif rule.ruleType == "NetworkRule" %} # NetworkRule
+  ipProtocols:
+  {%- for protocol in rule.ipProtocols %}
+    - '{{ protocol }}'
+  {%- endfor %}
+  sourceAddresses:
+  {%- for address in rule.sourceAddresses %}
+    - '{{ address }}'
+  {%- endfor %}
+  sourceIpGroups:
+  {%- for ip_group in rule.sourceIpGroups %}
+    - '{{ ip_group }}'
+  {%- endfor %}
+  destinationAddresses:
+  {%- for address in rule.destinationAddresses %}
+    - '{{ address }}'
+  {%- endfor %}
+  destinationIpGroups:
+  {%- for ip_group in rule.destinationIpGroups %}
+    - '{{ ip_group }}'
+  {%- endfor %}
+  destinationFqdns:
+  {%- for fqdn in rule.destinationFqdns %}
+    - '{{ fqdn }}'
+  {%- endfor %}
+  destinationPorts:
+  {%- for port in rule.destinationPorts %}
+    - '{{ port }}'
+  {%- endfor %}
+  {% elif rule.ruleType == "ApplicationRule" %} # ApplicationRule
+  terminateTLS: {{ rule.terminateTLS }}
+  protocols:
+  {%- for protocol in rule.protocols %}
+    - protocolType: '{{ protocol.protocolType }}'
+      port: {{ protocol.port }}
+  {%- endfor %}
+  sourceAddresses:
+  {%- for address in rule.sourceAddresses %}
+    - '{{ address }}'
+  {%- endfor %}
+  destinationAddresses:
+  {%- for address in rule.destinationAddresses %}
+    - '{{ address }}'
+  {%- endfor %}
+  sourceIpGroups:
+  {%- for ip_group in rule.sourceIpGroups %}
+    - '{{ ip_group }}'
+  {%- endfor %}
+  destinationIpGroups:
+  {%- for ip_group in rule.destinationIpGroups %}
+    - '{{ ip_group }}'
+  {%- endfor %}
+  targetFqdns:
+  {%- for fqdn in rule.targetFqdns %}
+    - '{{ fqdn }}'
+  {%- endfor %}
+  targetUrls:
+  {%- for url in rule.targetUrls %}
+    - '{{ url }}'
+  {%- endfor %}
+  fqdnTags:
+  {%- for fqdnTag in rule.fqdnTags %}
+    - '{{ fqdnTag }}'
+  {%- endfor %}
+  webCategories:
+  {%- for webCategory in rule.webCategories %}
+    - '{{ webCategory }}'
+  {%- endfor %}
+  httpHeadersToInsert:
+  {%- for header in rule.httpHeadersToInsert %}
+    - header: '{{ header.header }}'
+      value: '{{ header.value }}'
+  {%- endfor %}
+  {% endif %}
+{% endfor %}
 terms: []

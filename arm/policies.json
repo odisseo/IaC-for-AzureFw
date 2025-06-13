@@ -1,0 +1,304 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {},
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Network/firewallPolicies",
+            "apiVersion": "2024-05-01",
+            "name": "net01",
+            "location": "eastus",
+            "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                    "/subscriptions/ea555ca9-084d-4397-a2a7-47655e4bd0ea/resourceGroups/FW-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/fwmi": {}
+                }
+            },
+            "properties": {
+                "sku": {
+                    "tier": "Premium"
+                },
+                "transportSecurity": {
+                    "certificateAuthority": {
+                        "name": "FWcert",
+                        "keyVaultSecretId": "https://fwkv01.vault.azure.net/secrets/FWcert/f109eb30688b4f56bdfbe66513457480"
+                    }
+                },
+                "threatIntelMode": "Alert",
+                "threatIntelWhitelist": {
+                    "fqdns": [],
+                    "ipAddresses": []
+                },
+                "dnsSettings": {
+                    "servers": [],
+                    "enableProxy": true
+                },
+                "intrusionDetection": {
+                    "mode": "Off"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Network/firewallPolicies/ruleCollectionGroups",
+            "apiVersion": "2024-05-01",
+            "name": "net01/RCG_net_01",
+            "location": "eastus",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/firewallPolicies', 'net01')]"
+            ],
+            "properties": {
+                "priority": 500,
+                "ruleCollections": [
+                    {
+                        "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
+                        "action": {
+                            "type": "Allow"
+                        },
+                        "rules": [
+                            {
+                                "ruleType": "NetworkRule",
+                                "name": "Rnet1",
+                                "ipProtocols": [
+                                    "TCP"
+                                ],
+                                "sourceAddresses": [
+                                    "10.2.2.2"
+                                ],
+                                "sourceIpGroups": [],
+                                "destinationAddresses": [
+                                    "11.2.3.4"
+                                ],
+                                "destinationIpGroups": [],
+                                "destinationFqdns": [],
+                                "destinationPorts": [
+                                    "80"
+                                ]
+                            },
+                            {
+                                "ruleType": "NetworkRule",
+                                "name": "Rnet2",
+                                "ipProtocols": [
+                                    "UDP"
+                                ],
+                                "sourceAddresses": [],
+                                "sourceIpGroups": [
+                                    "/subscriptions/ea555ca9-084d-4397-a2a7-47655e4bd0ea/resourceGroups/ipgroups-RG/providers/Microsoft.Network/ipGroups/ALL_AZURE_DC"
+                                ],
+                                "destinationAddresses": [],
+                                "destinationIpGroups": [
+                                    "/subscriptions/ea555ca9-084d-4397-a2a7-47655e4bd0ea/resourceGroups/ipgroups-RG/providers/Microsoft.Network/ipGroups/ALL_ON_PREMISE_NETWORKS"
+                                ],
+                                "destinationFqdns": [],
+                                "destinationPorts": [
+                                    "90"
+                                ]
+                            },
+                            {
+                                "ruleType": "NetworkRule",
+                                "name": "Rnet3",
+                                "ipProtocols": [
+                                    "ICMP"
+                                ],
+                                "sourceAddresses": [
+                                    "22.3.4.4"
+                                ],
+                                "sourceIpGroups": [],
+                                "destinationAddresses": [
+                                    "AppConfiguration",
+                                    "ApplicationInsightsAvailability",
+                                    "AppServiceManagement"
+                                ],
+                                "destinationIpGroups": [],
+                                "destinationFqdns": [],
+                                "destinationPorts": [
+                                    "100"
+                                ]
+                            },
+                            {
+                                "ruleType": "NetworkRule",
+                                "name": "Rnet4",
+                                "ipProtocols": [
+                                    "Any"
+                                ],
+                                "sourceAddresses": [
+                                    "*"
+                                ],
+                                "sourceIpGroups": [],
+                                "destinationAddresses": [],
+                                "destinationIpGroups": [],
+                                "destinationFqdns": [
+                                    "time.microsoft.com"
+                                ],
+                                "destinationPorts": [
+                                    "11"
+                                ]
+                            }
+                        ],
+                        "name": "RC_net_1",
+                        "priority": 1000
+                    },
+                    {
+                        "ruleCollectionType": "FirewallPolicyNatRuleCollection",
+                        "action": {
+                            "type": "Dnat"
+                        },
+                        "rules": [
+                            {
+                                "ruleType": "NatRule",
+                                "name": "Rnat1",
+                                "translatedAddress": "34.5.6.7",
+                                "translatedPort": "8080",
+                                "ipProtocols": [
+                                    "UDP"
+                                ],
+                                "sourceAddresses": [
+                                    "10.1.1.1"
+                                ],
+                                "sourceIpGroups": [],
+                                "destinationAddresses": [
+                                    "22.3.4.5"
+                                ],
+                                "destinationPorts": [
+                                    "80"
+                                ]
+                            },
+                            {
+                                "ruleType": "NatRule",
+                                "name": "Rnat2",
+                                "translatedFqdn": "time.windows.com",
+                                "translatedPort": "8080",
+                                "ipProtocols": [
+                                    "UDP"
+                                ],
+                                "sourceAddresses": [],
+                                "sourceIpGroups": [
+                                    "/subscriptions/ea555ca9-084d-4397-a2a7-47655e4bd0ea/resourceGroups/ipgroups-RG/providers/Microsoft.Network/ipGroups/ALL_AZURE_DC"
+                                ],
+                                "destinationAddresses": [
+                                    "33.44.4.4"
+                                ],
+                                "destinationPorts": [
+                                    "80"
+                                ]
+                            }
+                        ],
+                        "name": "RC_nat_1",
+                        "priority": 900
+                    },
+                    {
+                        "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
+                        "action": {
+                            "type": "Allow"
+                        },
+                        "rules": [
+                            {
+                                "ruleType": "ApplicationRule",
+                                "name": "Rapp2",
+                                "protocols": [
+                                    {
+                                        "protocolType": "Https",
+                                        "port": 443
+                                    },
+                                    {
+                                        "protocolType": "Mssql",
+                                        "port": 3306
+                                    }
+                                ],
+                                "fqdnTags": [],
+                                "webCategories": [],
+                                "targetFqdns": [
+                                    "*.google.com"
+                                ],
+                                "targetUrls": [],
+                                "terminateTLS": false,
+                                "sourceAddresses": [
+                                    "192.1.1.1"
+                                ],
+                                "destinationAddresses": [],
+                                "sourceIpGroups": [],
+                                "httpHeadersToInsert": []
+                            },
+                            {
+                                "ruleType": "ApplicationRule",
+                                "name": "Rapp1",
+                                "protocols": [
+                                    {
+                                        "protocolType": "Https",
+                                        "port": 443
+                                    }
+                                ],
+                                "fqdnTags": [
+                                    "AzureBackup",
+                                    "MicrosoftIntune",
+                                    "WindowsUpdate",
+                                    "WindowsVirtualDesktop"
+                                ],
+                                "webCategories": [],
+                                "targetFqdns": [],
+                                "targetUrls": [],
+                                "terminateTLS": false,
+                                "sourceAddresses": [],
+                                "destinationAddresses": [],
+                                "sourceIpGroups": [
+                                    "/subscriptions/ea555ca9-084d-4397-a2a7-47655e4bd0ea/resourceGroups/ipgroups-RG/providers/Microsoft.Network/ipGroups/ALL_AZURE_DC"
+                                ],
+                                "httpHeadersToInsert": []
+                            },
+                            {
+                                "ruleType": "ApplicationRule",
+                                "name": "Rapp3",
+                                "protocols": [
+                                    {
+                                        "protocolType": "Mssql",
+                                        "port": 3306
+                                    }
+                                ],
+                                "fqdnTags": [],
+                                "webCategories": [
+                                    "AlcoholAndTobacco",
+                                    "ChildAbuseImages",
+                                    "CriminalActivity"
+                                ],
+                                "targetFqdns": [],
+                                "targetUrls": [],
+                                "terminateTLS": false,
+                                "sourceAddresses": [
+                                    "*"
+                                ],
+                                "destinationAddresses": [],
+                                "sourceIpGroups": [],
+                                "httpHeadersToInsert": []
+                            },
+                            {
+                                "ruleType": "ApplicationRule",
+                                "name": "Rapp4",
+                                "protocols": [
+                                    {
+                                        "protocolType": "Https",
+                                        "port": 443
+                                    }
+                                ],
+                                "fqdnTags": [],
+                                "webCategories": [],
+                                "targetFqdns": [],
+                                "targetUrls": [
+                                    "www.google.com/help"
+                                ],
+                                "terminateTLS": true,
+                                "sourceAddresses": [
+                                    "10.1.1.1"
+                                ],
+                                "destinationAddresses": [],
+                                "sourceIpGroups": [],
+                                "httpHeadersToInsert": []
+                            }
+                        ],
+                        "name": "RC_app_1",
+                        "priority": 1100
+                    }
+                ]
+            }
+        }
+    ]
+}

@@ -1,10 +1,7 @@
-pip>=25.0.1
-# csv
+pip>=23.0.1
 jinja2
-# os
 datetime
-logging
-sys
 pyyaml>=6.0
-shutil
-stat
+colorama
+parameters
+pyinstaller

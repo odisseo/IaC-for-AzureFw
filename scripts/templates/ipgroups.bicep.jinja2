@@ -5,11 +5,10 @@
 {% set location = data.get("location") -%}
 {% set ip_addresses = data.get("ipAddresses", []) -%}
 {% set resource_name = data.get("filename", "resource").replace(" ", "_") -%}
-{% set api_version = "2024-03-01" -%}
  
 resource {{ resource_name }} 'Microsoft.Network/ipGroups@{{ api_version }}' = {
   name: '{{ resource_name }}'
-  location: '{{ location }}'
+  location: '{{ regionName }}'
   properties: {
     ipAddresses: [
 {%- for ip in ip_addresses %}

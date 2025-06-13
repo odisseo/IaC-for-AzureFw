@@ -1,0 +1,82 @@
+{# Macros for handling arrays in Azure Bicep templates #}
+
+{% macro render_array(items, quote=true) -%}
+  [
+  {%- if items and items.strip() -%}
+    {% for item in items.split(',') -%}
+      {%- if item.strip() %}
+                {% if quote %}'{{ item.strip() }}'{% else %}{{ item.strip() }}{% endif %}
+      {%- endif %}
+    {%- endfor %}
+  {%- endif %}
+            ]
+{%- endmacro %}
+
+{% macro render_ip_groups_array(items) -%}
+  [
+  {%- if items and items.strip() -%}
+    {% for item in items.split(',') -%}
+      {%- if item.strip() %}
+                {{ item.strip() | replace('-', '_') | replace('.', '_') }}
+      {%- endif %}
+    {%- endfor %}
+  {%- endif %}
+            ]
+{%- endmacro %}
+
+{% macro render_resource_array(resources) -%}
+  [
+  {%- if resources and resources | length > 0 -%}
+    {% for resource in resources -%}
+      {%- if resource %}
+                '{{ resource }}'
+      {%- endif %}
+    {%- endfor %}
+  {%- endif %}
+            ]
+{%- endmacro %}
+
+{% macro render_protocols_array(protocols) -%}
+  [
+  {%- if protocols and protocols.strip() -%}
+    {% for protocol_entry in protocols.split(',') -%}
+      {%- if protocol_entry.strip() %}
+        {%- set protocol_parts = protocol_entry.split(':') -%}
+        {%- if protocol_parts|length >= 2 %}
+      {
+        protocolType: '{{ protocol_parts[0].strip() }}'
+        port: {{ protocol_parts[1].strip() }}
+      }
+        {%- endif %}
+      {%- endif %}
+    {%- endfor %}
+  {%- endif %}
+            ]
+{%- endmacro %}
+
+{% macro render_http_headers_array(headers) -%}
+  [
+  {%- if headers and headers.strip() -%}
+    {% for header in headers.split(',') -%}
+      {%- if header.strip() %}
+        {%- set header_parts = header.split('=') -%}
+        {%- if header_parts|length >= 2 %}
+      {
+        header: '{{ header_parts[0].strip() }}'
+        value: '{{ header_parts[1].strip() }}'
+      }
+        {%- endif %}
+      {%- endif %}
+    {%- endfor %}
+  {%- endif %}
+            ]
+{%- endmacro %}
+
+{% macro render_resource_array_dependson(resources) -%}
+  [{%- if resources and resources | length > 0 -%}
+    {%- for resource in resources -%}
+      {%- if resource %}{{ resource }}{% endif -%}
+      {%- if not loop.last %}, {% endif -%}
+    {%- endfor -%}
+  {%- endif -%}]
+{%- endmacro %}

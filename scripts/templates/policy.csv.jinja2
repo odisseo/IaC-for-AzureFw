@@ -1,10 +1,18 @@
-PolicyName;ParentPolicy;RuleCollectionGroup;RuleCollectionGroupPriority;RuleCollection;RuleCollectionPriority;RuleCollectionType;RuleCollectionAction;RuleName;RuleType;IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;DestinationFqdns;DestinationPorts;Notes
+PolicyName;ParentPolicy;RuleCollectionGroup;RuleCollectionGroupPriority;RuleCollection;RuleCollectionPriority;RuleCollectionType;RuleCollectionAction;RuleName;RuleType;
+{%- if rule_type == "NetworkRule" -%}
+IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;DestinationFqdns;DestinationPorts;Notes
+{%- elif rule_type == "NatRule" -%}
+IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationPorts;TranslatedAddress;TranslatedFqdn;TranslatedPort;Notes
+{%- elif rule_type == "ApplicationRule" -%}
+Protocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;TargetFqdns;TargetUrls;FqdnTags;WebCategories;TerminateTLS;HttpHeadersToInsert;Notes
+{%- endif %}
 {% for resource in resources -%}
-{% if resource.type == 'Microsoft.Network/firewallPolicies/ruleCollectionGroups' -%}
-{% for ruleCollection in resource.properties.ruleCollections -%}
-{% for rule in ruleCollection.rules -%}
-{{ resource.name.split('/')[0] }};{{ resource.policyParent }};{{ resource.name.split('/')[1] }};{{ resource.properties.priority }};{{ ruleCollection.name }};{{ ruleCollection.priority }};{{ ruleCollection.ruleCollectionType }};{{ ruleCollection.action.type }};{{ rule.name }};{{ rule.ruleType }};{{ ','.join(rule.ipProtocols) }};{{ ','.join(rule.sourceAddresses) }};{{ ','.join(rule.sourceIpGroups | map('replace', "[resourceId('Microsoft.Network/ipGroups', '", '') | map('replace', "')]", '')) }};{{ ','.join(rule.destinationAddresses) }};{{ ','.join(rule.destinationIpGroups | map('replace', "[resourceId('Microsoft.Network/ipGroups', '", '') | map('replace', "')]", '')) }};{{ ','.join(rule.destinationFqdns) }};{{ ','.join(rule.destinationPorts) }};{{ rule.notes }};
-{% endfor -%}
-{% endfor -%}
-{% endif -%}
+{{ resource.policyName }};{{ resource.policyParent }};{{ resource.ruleCollectionGroup }};{{ resource.ruleCollectionGroupPriority }};{{ resource.ruleCollection }};{{ resource.ruleCollectionPriority }};{{ resource.ruleCollectionType }};{{ resource.ruleCollectionAction }};{{ resource.name }};{{ resource.ruleType }};
+{%- if rule_type == "NetworkRule" -%}
+{{ resource.ipProtocols|safe_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationIpGroups|safe_join }};{{ resource.destinationFqdns|safe_join }};{{ resource.destinationPorts|dollar_join }};{{ resource.notes }}
+{%- elif rule_type == "NatRule" -%}
+{{ resource.ipProtocols|safe_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationPorts|dollar_join }};{{ resource.translatedAddress }};{{ resource.translatedFqdn }};{{ resource.translatedPort }};{{ resource.notes }}
+{%- elif rule_type == "ApplicationRule" -%}
+{{ resource.protocols|protocol_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationIpGroups|safe_join }};{{ resource.targetFqdns|safe_join }};{{ resource.targetUrls|safe_join }};{{ resource.fqdnTags|safe_join }};{{ resource.webCategories|safe_join }};{{ resource.terminateTLS }};{{ resource.httpHeadersToInsert|header_join }};{{ resource.notes }}
+{%- endif %}
 {% endfor -%}

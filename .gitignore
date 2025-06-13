@@ -1,9 +1,12 @@
-.IaC/
+IaC/
+dist/
+build/
+env/
+*.spec
 # docs/*
-_policies/*/*.yaml
-_policies/*/*/*.yaml
-_ipgroups/*.yaml
-bicep/*.bicep
-csv/*.csv
+# _csv/*.csv
+# _ipgroups/*.yaml
+# _policies/*.yaml
+# bicep/*.bicep
 scripts/libraries/__pycache__/*
 # requirements.txt
