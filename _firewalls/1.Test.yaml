@@ -1,4 +1,4 @@
-- firewallName: TestEW
+- firewallName: TestEW1P-VNET00-GLOBAL
   regionName: westeurope
   regionType: Prod
   firewallType: ""
@@ -9,15 +9,17 @@
   natGwPipName: ""
   natGwPipValue: ""
   policiesName:
-    - MIMEW1NW-FW_PARENT_POLICY-Pxx
-    - MIMEW1NW-FW_POLICY-Pxx
+    - TestEW1P_VNET00_GLOBAL_VNET00_GLOBAL_POLICY_P01
+    - TestEW_VNET00_GLOBAL_POLICY_P01
   policiesResourceGroup: FwPoliciesEw-rg
   ipGroupsResourceGroup: FwIpGroupsEw-rg
   eventHub: ""
-  scope: HQ-MIM-OVH-APP Delivery segregation
-  subscriptionId: ea555ca9-084d-4397-a2a7-47655e4bd0ea
+  scope: ""
+  subscriptionId: 00000000-0000-0000-0000-000000000000
+  ipGroupssubscriptionId: 00000000-0000-0000-0000-000000000000
+  tenantId: 00000000-0000-0000-0000-000000000000
 
-- firewallName: TestNE
+- firewallName: TestEN1P-VNET00-GLOBAL
   regionName: northeurope
   regionType: DR
   firewallType: ""
@@ -28,10 +30,12 @@
   natGwPipName: ""
   natGwPipValue: ""
   policiesName:
-    - MIMEW1NW-FW_PARENT_POLICY-Pxx
-    - MIMEW1NW-FW_POLICY-Pxx
+    - TestEN1P_VNET00_GLOBAL_VNET00_GLOBAL_POLICY_P01
+    - TestEN_VNET00_GLOBAL_POLICY_P01
   policiesResourceGroup: FwPoliciesEn-rg
   ipGroupsResourceGroup: FwIpGroupsEn-rg
   eventHub: ""
-  scope: HQ-MIM-OVH-APP Delivery segregation
-  subscriptionId: ea555ca9-084d-4397-a2a7-47655e4bd0ea
+  scope: ""
+  subscriptionId: 00000000-0000-0000-0000-000000000000
+  ipGroupssubscriptionId: 00000000-0000-0000-0000-000000000000
+  tenantId: 00000000-0000-0000-0000-000000000000

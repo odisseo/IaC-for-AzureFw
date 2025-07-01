@@ -6,10 +6,10 @@ import hashlib
 from datetime import datetime
 from jinja2 import Environment, FileSystemLoader
 # Update imports to use scripts.libraries prefix
-from scripts.libraries.CommonUtils import normalize_name, ensure_list, clean_directory
-from scripts.libraries.CsvUtils import csv_collect_policy_data
-from scripts.libraries.YamlUtils import format_ip_group, extract_base_policy_name
-from scripts.libraries.Parameters import Paths, Config, BASE_PATH
+from src.libraries.CommonUtils import normalize_name, ensure_list, clean_directory
+from src.libraries.CsvUtils import csv_collect_policy_data
+from src.libraries.YamlUtils import format_ip_group, extract_base_policy_name
+from src.libraries.Parameters import Paths, Config, BASE_PATH
 
 def compare_policy_files():
     """

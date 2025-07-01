@@ -5,3 +5,4 @@ pyyaml>=6.0
 colorama
 parameters
 pyinstaller
+deepdiff>=6.2.0

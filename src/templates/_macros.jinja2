@@ -12,12 +12,12 @@
             ]
 {%- endmacro %}
 
-{% macro render_ip_groups_array(items) -%}
+{% macro render_ip_groups_array(items, subscription_id, resource_group) -%}
   [
   {%- if items and items.strip() -%}
     {% for item in items.split(',') -%}
       {%- if item.strip() %}
-                {{ item.strip() | replace('-', '_') | replace('.', '_') }}
+                '/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Network/ipGroups/{{ item.strip() | replace('-', '_') | replace('.', '_') }}'
       {%- endif %}
     {%- endfor %}
   {%- endif %}

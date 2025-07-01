@@ -1,30 +1,20 @@
 import os
+import re
+import json
 import logging
-import subprocess
-from scripts.libraries.CommonUtils import (
+from datetime import datetime
+from src.libraries.CommonUtils import (
     load_yaml_file, render_jinja_template, 
-    ensure_list
+    load_json_file,
+    ensure_list,
+    remove_date_suffix
 )
 
-def collect_policy_data_from_yaml(policies_dir, commit_suffix=None, firewallname=None):
+policy_generation_count = {}
+
+def collect_policy_data_from_yaml(policies_dir, commit_suffix=None):
     """
     Collect policy data from YAML files in the policy directory structure.
-    
-    Structure:
-    - policies_dir/
-      - policy_name/                # Policy folder
-        - main_policy.yaml          # Main policy configuration
-        - priority_rcg_name/        # RCG folder (e.g., 1000_EW_AGL_RCG)
-          - main_rcg.yaml           # RCG configuration
-          - priority_rc_name.yaml   # Rule collection file
-    
-    Args:
-        policies_dir: Path to the policies directory
-        commit_suffix: Suffix to use for policy names (date_commit format)
-        firewallname: Name of the firewall to be used in policy names
-    
-    Returns:
-        dict: Policy data structured for render_template
     """
     policies = {}
     
@@ -59,21 +49,14 @@ def collect_policy_data_from_yaml(policies_dir, commit_suffix=None, firewallname
                 logging.warning(f"BasePolicy exists but does not have an 'id' field in policy {policy_name}")
         
         # Modify policy name with firewall name if provided
-        modified_policy_name = policy_name
-        if firewallname:
-            # Find the first underscore to determine what to replace
-            if '_' in policy_name:
-                policy_parts = policy_name.split('_', 1)
-                modified_policy_name = f"{firewallname}_{policy_parts[1]}"
-            else:
-                # If no underscore, just prefix with firewall name
-                modified_policy_name = f"{firewallname}_{policy_name}"
+        modified_policy_name = policy_data.get('name', policy_name)  # Use name from YAML if available
         
         # Create the policy key with commit_suffix
-        policy_key = modified_policy_name
         if commit_suffix:
-            policy_key = f"{modified_policy_name}-{commit_suffix}"
-            
+            policy_key = f"{modified_policy_name}_{commit_suffix}"
+        else:
+            policy_key = modified_policy_name
+        
         # Create policy entry with combined name including commit suffix
         policies[policy_key] = {
             "rcg_order": [],
@@ -248,101 +231,3 @@ def collect_policy_data_from_yaml(policies_dir, commit_suffix=None, firewallname
     
     return policies
 
-def load_ipgroups_from_yaml(ipgroups_dir):
-    """
-    Load IP groups from YAML files in the specified directory.
-    
-    Args:
-        ipgroups_dir: Path to the directory containing IP group YAML files
-        
-    Returns:
-        list: List of IP group data dictionaries with 'filename' added
-    """
-    yaml_contents = []
-    
-    if not os.path.isdir(ipgroups_dir):
-        logging.error(f"IP groups directory doesn't exist: {ipgroups_dir}")
-        return yaml_contents
-        
-    for file_name in os.listdir(ipgroups_dir):
-        if file_name.endswith('.yaml'):
-            file_path = os.path.join(ipgroups_dir, file_name)
-            ipgroup_data = load_yaml_file(file_path)
-            
-            if ipgroup_data:
-                # Add filename to the data for use in the template
-                ipgroup_data['filename'] = file_name.replace('.yaml', '')
-                yaml_contents.append(ipgroup_data)
-                
-    return yaml_contents
-
-def deploy_bicep(file, subscriptionid, resource_group):
-    """
-    Deploy a Bicep file to Azure.
-    
-    Args:
-        file: Path to the Bicep file
-        subscriptionid: Azure subscription ID
-        resource_group: Resource group to deploy to
-        
-    Returns:
-        bool: True if deployment was successful, False otherwise
-    """
-    if not os.path.exists(file):
-        logging.error(f"Bicep file does not exist: {file}")
-        return False
-
-    try:
-        # Build the command as a single string, enclosing the file path in double quotes.
-        cmd = (
-            f'az deployment group create -g {resource_group} -o none '
-            f'--subscription {subscriptionid} --template-file "{file}"'
-        )
-        # Pass the complete command to PowerShell using the -Command argument.
-        command = ["powershell", "-Command", cmd]
-        subprocess.run(command, shell=True, check=True)
-        logging.info(f"Successfully deployed: {file}")
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to deploy {file}: {e}", exc_info=True)
-        return False
-
-def deploy_policies(files, subscriptionid, policiesrg):
-    """
-    Deploy multiple policy Bicep files to Azure.
-    
-    Args:
-        files: List of Bicep file paths
-        subscriptionid: Azure subscription ID
-        policiesrg: Resource group to deploy to
-        
-    Returns:
-        bool: True if all deployments were successful, False otherwise
-    """
-    all_success = True
-    
-    for file in files:
-        if not deploy_bicep(file, subscriptionid, policiesrg):
-            all_success = False
-    
-    return all_success
-
-def deploy_ipgroups(ipgroup_files, subscriptionid, ipgrouprg):
-    """
-    Deploy multiple IP group Bicep files to Azure.
-    
-    Args:
-        ipgroup_files: List of IP group Bicep file paths
-        subscriptionid: Azure subscription ID
-        ipgrouprg: Resource group to deploy to
-        
-    Returns:
-        bool: True if all deployments were successful, False otherwise
-    """
-    all_success = True
-    
-    for file in ipgroup_files:
-        if not deploy_bicep(file, subscriptionid, ipgrouprg):
-            all_success = False
-    
-    return all_success

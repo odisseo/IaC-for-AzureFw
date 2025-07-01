@@ -1,11 +1,10 @@
 import os
 import logging
-from scripts.libraries.CommonUtils import get_id_with_date, clean_directory, render_jinja_template
-from scripts.libraries.BicepUtils import (
-    collect_policy_data_from_yaml, 
-    load_ipgroups_from_yaml
+from src.libraries.CommonUtils import get_id_with_date, clean_directory, render_jinja_template, remove_date_suffix
+from src.libraries.BicepUtils import (
+    collect_policy_data_from_yaml
 )
-from scripts.libraries.Parameters import Paths, Config
+from src.libraries.Parameters import Paths, Config
 
 def validate_rule_types(policies):
     """
@@ -50,7 +49,7 @@ def validate_rule_types(policies):
     
     return validation_passed
 
-def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version=None, regionName=None):
+def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version=None, regionName=None, ipgroupssubscriptionid=None):
     """
     Export Azure Firewall policies from YAML structure to Bicep templates.
     
@@ -61,10 +60,11 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
         firewallname: Name of the firewall
         version: Not used in new structure
         regionName: Azure region where the resources will be deployed
+        ipgroupssubscriptionid: Subscription ID for IP groups (if different from policies)
         
     Returns:
         tuple: (success, generated_files) where success is a boolean and 
-               generated_files is a dict with 'policies' and 'ipgroups' keys
+               generated_files is a dict with 'policies' key
     """
     # Ensure directories exist
     os.makedirs(Paths.POLICIES_DIR, exist_ok=True)
@@ -72,8 +72,7 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
     os.makedirs(Paths.BICEP_DIR, exist_ok=True)
     
     generated_files = {
-        'policies': [],
-        'ipgroups': []
+        'policies': []
     }
     
     # Get commit ID with date for policy name suffix
@@ -88,10 +87,24 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
     else:
         logging.info(f"Using region: {regionName}")
     
+    # If ipgroupssubscriptionid is not provided, this will cause an error
+    if not ipgroupssubscriptionid:
+        logging.error("No IP groups subscription ID specified. This is a required parameter.")
+        return False, generated_files
+    else:
+        logging.info(f"Using IP groups subscription ID: {ipgroupssubscriptionid}")
+        
+    # If ipgrouprg is not provided, this will cause an error
+    if not ipgrouprg:
+        logging.error("No IP groups resource group specified. This is a required parameter.")
+        return False, generated_files
+    else:
+        logging.info(f"Using IP groups resource group: {ipgrouprg}")
+    
     # Use the collect_policy_data_from_yaml function to process policies directly
     logging.info(f"Collecting policy data from YAML files in {Paths.POLICIES_DIR}...")
     
-    policies = collect_policy_data_from_yaml(Paths.POLICIES_DIR, commit_suffix, firewallname)
+    policies = collect_policy_data_from_yaml(Paths.POLICIES_DIR, commit_suffix)
     
     if not policies:
         logging.error("No policies found in policies directory")
@@ -107,10 +120,26 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
     policy_count = 0
     
     for policy_key, policy_data in policies.items():
-        # Extract original policy name without commit suffix to use for bicep filename
-        original_name = policy_data.get("original_name", policy_key.split("-")[0])
-        # Use the original policy name for the bicep file (without suffix)
-        bicep_file_name = f"{original_name}.bicep"
+
+        region_prefix = policy_key[:7]  # Extract the first 6 characters for region prefix
+        
+        # Check regionName to adjust original_name
+        if "westeurope" in regionName and "EN" in region_prefix:
+            policy_key = policy_key.replace("EN", "EW", 1)  # Replace only the first occurrence
+        elif "northeurope" in regionName and "EW" in region_prefix:
+            policy_key = policy_key.replace("EW", "EN", 1)  # Replace only the first occurrence
+        elif "eastus" in regionName and "UW" in region_prefix:
+            policy_key = policy_key.replace("UW", "UE", 1)  # Replace only the first occurrence
+        elif "westus" in regionName and "UE" in region_prefix:
+            policy_key = policy_key.replace("UE", "UW", 1)  # Replace only the first occurrence
+        else:
+            logging.info(f"No region match found for {regionName}, using original name.")
+            
+        # Extract original policy name without commit suffix to use for Bicep filename
+        policy_bicep = remove_date_suffix(policy_key)
+
+        # Use the policy name WITHOUT suffix for the Bicep file name
+        bicep_file_name = f"{policy_bicep}.bicep"
         output_path = os.path.join(Paths.BICEP_DIR, bicep_file_name)
         
         # Render the template for the current policy
@@ -120,6 +149,7 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
             policies={policy_key: policy_data},
             subscriptionid=subscriptionid,
             ipgrouprg=ipgrouprg,
+            ipgroupssubscriptionid=ipgroupssubscriptionid,
             policiesrg=policiesrg,
             regionName=regionName,
             api_version=Config.FIREWALL_API_VERSION
@@ -131,26 +161,7 @@ def export_policies(subscriptionid, ipgrouprg, policiesrg, firewallname, version
             logging.error(f"Failed to generate Bicep file for policy: {policy_key}")
             success = False
     
-    # Define the output path for the IP groups Bicep file - without commit suffix in filename
-    ipgroups_output_path = os.path.join(Paths.BICEP_DIR, f"{firewallname}-ipgroups.bicep")
-    
-    # Load IP groups and generate Bicep file
-    ipgroups = load_ipgroups_from_yaml(Paths.IPGROUPS_DIR)
-    if ipgroups:
-        if render_jinja_template(
-            Paths.TEMPLATE_IPGROUPS_BICEP,
-            ipgroups_output_path,
-            yaml_contents=ipgroups,
-            regionName=regionName,
-            api_version=Config.FIREWALL_API_VERSION
-        ):
-            generated_files['ipgroups'].append(ipgroups_output_path)
-            logging.info(f"Generated Bicep file for IP groups: {os.path.basename(ipgroups_output_path)}")
-        else:
-            logging.error("Failed to generate Bicep file for IP groups")
-            success = False
-    else:
-        logging.warning(f"No IP groups found in folder: {Paths.IPGROUPS_DIR}")
-        success = False
+    # Log summary of generated files
+    logging.info(f"Export summary: Generated {len(generated_files['policies'])} Bicep files")
     
     return success, generated_files

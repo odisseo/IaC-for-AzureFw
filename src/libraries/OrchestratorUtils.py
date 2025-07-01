@@ -6,16 +6,19 @@ including importing, exporting, synchronizing, and deploying policies.
 """
 import os
 import logging
-from scripts.libraries.CommonUtils import (
+import sys
+import copy
+from src.libraries.CommonUtils import (
     clean_directory, 
     commit_changes_to_git, 
     pull_changes_from_git, 
-    get_id_with_date
+    get_id_with_date,
+    remove_date_suffix
 )
-from scripts.libraries.ImportUtils import import_policies
-from scripts.libraries.ExportUtils import export_policies
-from scripts.libraries.DeployUtils import deploy_resources, find_bicep_files, select_bicep_files
-from scripts.libraries.Parameters import (
+from src.libraries.ImportUtils import import_policies, download_latest_arm_template
+from src.libraries.ExportUtils import export_policies
+from src.libraries.DeployUtils import deploy_resources, find_bicep_files, select_bicep_files
+from src.libraries.Parameters import (
     get_environment_list, 
     Paths, 
     FIREWALL_DATA, 
@@ -24,9 +27,9 @@ from scripts.libraries.Parameters import (
     list_available_environments,
     parse_arguments
 )
-from scripts.libraries.SyncUtils import compare_policy_files, update_sync_lock, has_user_changes, calculate_content_hash
-from scripts.libraries.YamlUtils import create_yaml_from_policies, process_csv_file as yaml_process_csv_file
-from scripts.libraries.CsvUtils import csv_collect_policy_data, csv_render_csv
+from src.libraries.SyncUtils import compare_policy_files, update_sync_lock, has_user_changes, calculate_content_hash
+from src.libraries.YamlUtils import create_yaml_from_policies, process_csv_file as yaml_process_csv_file
+from src.libraries.CsvUtils import csv_collect_policy_data, csv_render_csv
 
 def print_header():
     """Print the header for the application."""
@@ -251,11 +254,34 @@ def handle_git_operations(skip_git, non_interactive, commit_message_prefix):
             return True, None
         commit_message = f"{commit_message_prefix} - {commit_message}"
     
-    logging.info(f"Committing changes with message: {commit_message}")
-    if not non_interactive:
-        print(f"\nCommitting changes with message: {commit_message}")
+    # Generate current datetime string
+    from datetime import datetime
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Get commit suffix directly from get_id_with_date
+    try:
+        from src.libraries.CommonUtils import get_id_with_date
+        random_id = get_id_with_date()
+        commit_suffix = None
+        if random_id:
+            id_parts = random_id.split('_')
+            commit_suffix = id_parts[1] if len(id_parts) > 1 else random_id
+            
+        # Format the commit message with datetime and commit_suffix
+        formatted_commit_message = f"[{current_datetime}][{commit_suffix}] {commit_message}"
         
-    commit_success, git_id = commit_changes_to_git(commit_message)
+        logging.info(f"Committing changes with message: {formatted_commit_message}")
+        if not non_interactive:
+            print(f"\nCommitting changes with message: {formatted_commit_message}")
+            
+        commit_success, git_id = commit_changes_to_git(formatted_commit_message)
+    except ValueError as e:
+        error_message = str(e)
+        logging.error(f"Failed to generate commit ID: {error_message}")
+        if not non_interactive:
+            print(f"\nERROR: Failed to generate commit ID: {error_message}")
+            print("\nPlease run a policy sync operation and try again.")
+        return False, None
     if not commit_success:
         if not non_interactive:
             print("\nWARNING: Failed to commit changes to Git repository.")
@@ -278,7 +304,6 @@ def deploy_firewall_resources(firewall_params, files, non_interactive):
     """
     # Create selected_files structure for deployment
     selected_files = {
-        'ipgroups': files.get('ipgroups', []),
         'policies': files.get('policies', [])
     }
     
@@ -286,17 +311,17 @@ def deploy_firewall_resources(firewall_params, files, non_interactive):
     subscription_id = firewall_params.get('subscriptionid', '')
     ipgroup_rg = firewall_params.get('ipgrouprg', '')
     policies_rg = firewall_params.get('policiesrg', '')
+    tenant_id = firewall_params.get('tenantid', '')  # Extract tenant ID from parameters
     
     # Count total files to deploy
-    total_files = len(selected_files['policies']) + len(selected_files['ipgroups'])
+    total_files = len(selected_files['policies'])
     
     # Confirm deployment in interactive mode
     if not non_interactive:
         print(f"\nYou are about to deploy {total_files} Bicep files to Azure:")
-        print(f"  - {len(selected_files['ipgroups'])} IP Group files")
         print(f"  - {len(selected_files['policies'])} Policy files")
         print(f"\nSubscription: {subscription_id}")
-        print(f"IP Groups Resource Group: {ipgroup_rg}")
+        print(f"Tenant: {tenant_id}")
         print(f"Policies Resource Group: {policies_rg}")
         
         confirm = input("\nDo you want to proceed with deployment? (y/n): ").lower()
@@ -310,7 +335,7 @@ def deploy_firewall_resources(firewall_params, files, non_interactive):
     if not non_interactive:
         print(f"\nDeploying {total_files} resources to Azure...")
         
-    success = deploy_resources(selected_files, subscription_id, ipgroup_rg, policies_rg)
+    success = deploy_resources(selected_files, subscription_id, ipgroup_rg, policies_rg, tenant_id)
     
     if success:
         logging.info("Deployment completed successfully")
@@ -330,8 +355,9 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
     Modified workflow:
     1. Sync policies
     2. Generate random ID (instead of Git commit ID)
-    3. Export and deploy each firewall sequentially
-    4. Commit changes to Git after all deployments are complete
+    3. Export all firewalls sequentially
+    4. Commit changes to Git
+    5. Deploy each firewall sequentially if requested
     
     Args:
         firewall_key: The firewall key for the group of firewalls to export
@@ -352,17 +378,21 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
         logging.warning("Synchronization had issues. Proceeding with export using available data.")
     
     # 2. Generate random ID for file naming
-    random_id = get_id_with_date()
-    if not random_id:
-        logging.warning("Could not generate random ID, using timestamp instead")
-        from datetime import datetime
-        random_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Extract just the unique part of the ID (without the date)
-    id_parts = random_id.split('_')
-    unique_id = id_parts[1] if len(id_parts) > 1 else random_id
-    
-    logging.info(f"Using random ID for policy names: {random_id}")
+    try:
+        random_id = get_id_with_date()
+        
+        # Extract just the unique part of the ID (without the date)
+        id_parts = random_id.split('_')
+        unique_id = id_parts[1] if len(id_parts) > 1 else random_id
+        
+        logging.info(f"Using random ID for policy names: {random_id}")
+    except ValueError as e:
+        error_message = str(e)
+        logging.error(f"Failed to generate ID: {error_message}")
+        if not non_interactive:
+            print(f"\nERROR: Failed to generate ID: {error_message}")
+            print("\nPlease run a policy sync operation and try again.")
+        return False, None, None, None
     
     # 3. Clean the bicep directory once for all firewalls
     logging.info("Cleaning the bicep directory before export...")
@@ -385,9 +415,10 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
         for i, fw in enumerate(firewalls, 1):
             print(f"{i}. {fw.get('firewallName', 'Unknown')}")
     
-    # 5. Process each firewall one by one - export and deploy immediately
+    # 5. PHASE 1: Export all firewalls first
     all_success = True
     exported_files = {}
+    firewall_params = []
     
     for fw in firewalls:
         fw_name = fw.get("firewallName", "")
@@ -395,14 +426,25 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
             logging.warning("Skipping firewall with no name")
             continue
         
+        # Get IP Group Resource Group from the firewall YAML
+        ipgroup_rg = fw.get("ipGroupsResourceGroup", "")
+        
+        # Get IP Groups Subscription ID from the firewall YAML (may be different from policies subscription)
+        ipgroups_subscription_id = fw.get("ipGroupssubscriptionId", fw.get("subscriptionId", ""))
+        
         # Create params for this firewall
         params = {
             "subscriptionid": fw.get("subscriptionId", ""),
-            "ipgrouprg": fw.get("ipGroupsResourceGroup", ""),
+            "ipgrouprg": ipgroup_rg,
+            "ipgroupssubscriptionid": ipgroups_subscription_id,
             "policiesrg": fw.get("policiesResourceGroup", ""),
             "firewallname": fw_name,
-            "regionName": fw.get("regionName", Paths.DEFAULT_LOCATION)
+            "regionName": fw.get("regionName", Paths.DEFAULT_LOCATION),
+            "tenantid": fw.get("tenantId", "")
         }
+        
+        # Store params for later deployment
+        firewall_params.append(params)
         
         # Export policies for this firewall
         logging.info(f"Exporting policies for firewall: {fw_name}")
@@ -415,7 +457,8 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
             params["policiesrg"], 
             fw_name,
             random_id,
-            params.get("regionName", Paths.DEFAULT_LOCATION)
+            params.get("regionName", Paths.DEFAULT_LOCATION),
+            params["ipgroupssubscriptionid"]
         )
         
         if not export_result:
@@ -435,74 +478,16 @@ def export_policies_workflow(firewall_key, skip_git=False, non_interactive=False
                 for file_path in file_list:
                     print(f"  - {os.path.basename(file_path)}")
         
-        # Deploy immediately after export if user confirms
-        if not non_interactive:
-            deploy_choice = input(f"\nDo you want to deploy the generated resources for {fw_name}? (y/n): ").lower()
-            if deploy_choice == 'y':
-                # Create selected_files structure for deployment
-                selected_files = {
-                    'ipgroups': files.get('ipgroups', []),
-                    'policies': files.get('policies', [])
-                }
-                
-                # Confirm deployment
-                total_files = len(selected_files['policies']) + len(selected_files['ipgroups'])
-                print(f"\nYou are about to deploy {total_files} Bicep files to Azure for {fw_name}.")
-                confirm = input("Are you sure you want to proceed with deployment? (y/n): ").lower()
-                
-                if confirm == 'y':
-                    logging.info(f"Deploying {total_files} files for {fw_name}...")
-                    deployment_success = deploy_resources(
-                        selected_files, 
-                        params["subscriptionid"], 
-                        params["ipgrouprg"], 
-                        params["policiesrg"]
-                    )
-                    
-                    if deployment_success:
-                        logging.info(f"Deployment for {fw_name} completed successfully")
-                        print(f"\nDeployment for {fw_name} completed successfully.")
-                    else:
-                        logging.warning(f"Deployment for {fw_name} completed with warnings.")
-                        print(f"\nDeployment for {fw_name} completed with warnings. Check the logs for details.")
-                else:
-                    logging.info(f"Deployment for {fw_name} cancelled by user")
-                    print(f"\nDeployment for {fw_name} cancelled.")
-        
         # Store exported files for this firewall
         exported_files[fw_name] = files
     
-    # 6. After all firewalls are processed, commit changes to Git if not skipped
-    if not skip_git:
-        logging.info("All firewalls processed. Committing changes to Git...")
-        if not non_interactive:
-            print("\nAll firewalls processed. Committing changes to Git...")
-        
-        # Format timestamp for commit message
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Get commit message with new format
-        if non_interactive:
-            commit_message = f"[{unique_id}] Firewall {firewall_key}: Automated export and deployment"
-        else:
-            user_description = input("\nEnter a description for the Git commit: ")
-            if not user_description:
-                commit_message = f"[{unique_id}] Firewall {firewall_key}: Manual export and deployment"
-            else:
-                commit_message = f"[{unique_id}] Firewall {firewall_key}: {user_description}"
-        
-        # Commit changes to Git
-        git_success, _ = commit_changes_to_git(commit_message)
-        
-        if not git_success:
-            logging.warning("Failed to commit changes to Git, but export and deployment were completed.")
-            if not non_interactive:
-                print("\nWARNING: Failed to commit changes to Git, but export and deployment were completed.")
-    else:
+    # 6. Skip Git commit in this function - it will be handled by handle_export_policies
+    if skip_git:
         logging.info("Skipping Git commit as requested")
     
-    return all_success, exported_files
+    # Return the success status and exported files, but don't do Git commit or ask about deployment here
+    # The deployment prompt will be handled in handle_export_policies
+    return all_success, exported_files, firewall_key, unique_id
 
 def handle_update_repository(args):
     """
@@ -534,19 +519,41 @@ def handle_update_repository(args):
         print(f"\nError during repository update: {str(e)}")
         return False
 
-def handle_import_policies(args):
-    """
-    Handle the import policies operation without Git operations.
-    
-    Args:
-        args: Command line arguments
-        
-    Returns:
-        bool: True if import was successful, False otherwise
-    """
+def handle_download_templates(args):
+    """Handle the download ARM templates operation."""
     try:
-        logging.info("Starting policy import...")
-        
+        # Get environment from command line or ask user
+        if args.non_interactive:
+            environment = get_environment_from_cmdline(args.environment)
+            if not environment:
+                print("Error: Environment must be specified in non-interactive mode")
+                return 1
+        else:
+            # Use list_available_environments in interactive mode
+            selected = list_available_environments(interactive=True)
+            if not selected:
+                print("No environment selected. Operation cancelled.")
+                return 1
+            # selected is a tuple of (idx, key), we want the key
+            environment = selected[1]
+
+        print(f"\nDownloading latest ARM templates for environment {environment}...")
+        success, message = download_latest_arm_template(environment)
+        if success:
+            print(message)
+            return 0
+        else:
+            print(f"Download failed: {message}")
+            return 1
+            
+    except Exception as e:
+        print(f"Error during download operation: {str(e)}")
+        logging.exception("Error during download operation")
+        return 1
+
+def handle_import_policies(args):
+    """Handle the import policies operation."""
+    try:
         # Get environment
         environment = args.environment
         if not environment and not args.non_interactive:
@@ -562,30 +569,24 @@ def handle_import_policies(args):
                 if not args.non_interactive:
                     print(f"\nEnvironment not found: {environment}")
                 return False
-        
+
         logging.info(f"Importing policies for environment: {env_name} (key: {firewall_key})")
         if not args.non_interactive:
             print(f"\nImporting policies for environment: {env_name}")
-        
-        # Execute import workflow
-        import_success = import_policies_workflow(firewall_key)
-        
-        if import_success:
-            logging.info("Policy import completed successfully")
-            if not args.non_interactive:
-                print("\nPolicy import completed successfully.")
-            return True
+
+        # Execute import with the firewall key
+        success, message = import_policies(firewall_key)
+        if success:
+            print("Import completed successfully")
+            return 0
         else:
-            logging.error("Policy import failed")
-            if not args.non_interactive:
-                print("\nPolicy import failed. Check the logs for details.")
-            return False
+            print(f"Import failed: {message}")
+            return 1
             
     except Exception as e:
-        logging.error(f"Error during policy import: {str(e)}", exc_info=True)
-        if not args.non_interactive:
-            print(f"\nError during policy import: {str(e)}")
-        return False
+        print(f"Error during import operation: {str(e)}")
+        logging.exception("Error during import operation")
+        return 1
 
 def handle_sync_policies(args):
     """
@@ -643,18 +644,81 @@ def handle_export_policies(args):
             print(f"\nExporting policies for environment: {env_name}")
         
         # Execute export workflow
-        success, _ = export_policies_workflow(firewall_key, skip_git=args.skip_git, non_interactive=args.non_interactive)
+        success, exported_files, firewall_key, unique_id = export_policies_workflow(firewall_key, skip_git=True, non_interactive=args.non_interactive)
         
-        if success:
-            logging.info("Policy export completed successfully")
-            if not args.non_interactive:
-                print("\nPolicy export completed successfully.")
-            return True
-        else:
+        if not success:
             logging.error("Policy export failed")
             if not args.non_interactive:
                 print("\nPolicy export failed. Check the logs for details.")
             return False
+        
+        # If we're in non-interactive mode or the export failed, return here
+        if args.non_interactive:
+            logging.info("Policy export completed successfully (non-interactive mode)")
+            return True
+        
+        # In interactive mode, ask if user wants to compare
+        print("\nPolicy export completed successfully.")
+        compare_choice = input("\nDo you want to compare the newly created Bicep with existing ARM templates? (y/n): ").lower()
+        
+        if compare_choice == 'y':
+            logging.info("User chose to compare ARM templates")
+            print("\nComparing ARM templates...")
+            
+            # Create a copy of args to modify
+            compare_args = copy.deepcopy(args)
+            compare_args.include_diff = True  # Show diff by default in this workflow
+            
+            # Run the compare ARM templates operation
+            compare_success = handle_compare_arm(compare_args)
+            
+            if not compare_success:
+                print("\nComparison completed with warnings or errors. Check the logs for details.")
+            else:
+                print("\nComparison completed successfully.")
+        
+        # Ask if user wants to commit changes to Git
+        git_choice = input("\nDo you want to commit the changes to Git? (y/n): ").lower()
+        
+        if git_choice == 'y' and not args.skip_git:
+            logging.info("User chose to commit changes to Git")
+            
+            # Create a copy of args to modify
+            commit_args = copy.deepcopy(args)
+            # Add firewall info to args for use in handle_commit_repository
+            commit_args.firewall_key = firewall_key
+            # No longer setting unique_id as it will be generated during commit
+            
+            # Call the repository commit handler
+            handle_commit_repository(commit_args)
+        else:
+            if args.skip_git:
+                logging.info("Git operations are disabled by command line flag")
+                print("\nSkipping Git commit as it's disabled by command line flag.")
+            else:
+                logging.info("User chose not to commit changes to Git")
+                print("\nSkipping Git commit as requested.")
+        
+        # Ask if user wants to deploy
+        deploy_choice = input("\nDo you want to deploy the generated Bicep files? (y/n): ").lower()
+        
+        if deploy_choice == 'y':
+            logging.info("User chose to deploy Bicep files")
+            print("\nDeploying Bicep files...")
+            
+            # Run the deploy Bicep operation
+            deploy_success = handle_deploy_bicep(args)
+            
+            if not deploy_success:
+                print("\nDeployment completed with warnings or errors. Check the logs for details.")
+                return False
+            else:
+                print("\nDeployment completed successfully.")
+        else:
+            logging.info("User chose not to deploy Bicep files")
+            print("\nSkipping deployment. Bicep files have been created in the bicep/ directory.")
+        
+        return True
             
     except Exception as e:
         logging.error(f"Error during policy export: {str(e)}", exc_info=True)
@@ -742,7 +806,8 @@ def handle_deploy_bicep(args):
                 "ipgrouprg": fw.get("ipGroupsResourceGroup", ""),
                 "policiesrg": fw.get("policiesResourceGroup", ""),
                 "firewallname": fw_name,
-                "regionName": fw.get("regionName", Paths.DEFAULT_LOCATION)
+                "regionName": fw.get("regionName", Paths.DEFAULT_LOCATION),
+                "tenantid": fw.get("tenantId", "")  # Include tenant ID from firewall configuration
             }
             
             # Deploy resources
@@ -766,3 +831,241 @@ def handle_deploy_bicep(args):
         if not args.non_interactive:
             print(f"\nError during Bicep deployment: {str(e)}")
         return False
+
+def handle_compare_arm(args):
+    """
+    Handle the comparison of ARM templates between import and export directories.
+    
+    This function orchestrates the comparison of ARM templates between the arm_import
+    and arm_export directories, finds matching templates, compares them, and saves
+    the results to the comparison directory.
+    
+    Args:
+        args: Command line arguments containing include_diff and save_results flags
+        
+    Returns:
+        bool: True if the comparison was successful, False otherwise
+    """
+    from src.libraries.CompareUtils import (
+        find_matching_templates, compare_arm_templates, 
+        save_comparison_result, generate_arm_templates_from_bicep
+    )
+    
+    logging.info("Starting ARM template comparison...")
+    print("\nStarting ARM template comparison...")
+    
+    # Ask if user wants to download the latest ARM templates first
+    if not args.non_interactive:
+        download_choice = input("\nDo you want to download the latest ARM templates from Azure before comparing? (y/n): ").lower()
+        if download_choice == 'y':
+            print("\nDownloading the latest ARM templates...")
+            
+            # Show environment selection to user
+            selected = list_available_environments(interactive=True)
+            if not selected:
+                print("No environment selected. Proceeding with comparison using existing templates.")
+            else:
+                # selected is a tuple of (idx, key), we want the key
+                environment = selected[1]
+                
+                print(f"\nDownloading latest ARM templates for environment {environment}...")
+                success, message = download_latest_arm_template(environment)
+                
+                if success:
+                    print(message)
+                else:
+                    print(f"Download failed: {message}")
+                    print("Proceeding with comparison using existing templates.")
+    
+    # First, generate ARM templates from Bicep files
+    logging.info("Generating ARM templates from Bicep files...")
+    print("\nGenerating ARM templates from Bicep files...")
+    
+    generation_success, generated_templates = generate_arm_templates_from_bicep()
+    
+    if not generation_success:
+        msg = "Failed to generate one or more ARM templates from Bicep files. Please check the logs for details."
+        logging.error(msg)
+        print(f"\nERROR: {msg}")
+        print("\nComparison workflow stopped due to ARM template generation failure.")
+        return False
+    
+    if not generated_templates:
+        msg = "No ARM templates were generated from Bicep files"
+        logging.warning(msg)
+        print(f"\n{msg}")
+    else:
+        logging.info(f"Successfully generated {len(generated_templates)} ARM templates")
+        print(f"\nSuccessfully generated {len(generated_templates)} ARM templates")
+    
+    # Find matching templates between import and export directories
+    matches = find_matching_templates()
+    
+    if not matches:
+        msg = "No matching ARM templates found to compare"
+        logging.warning(msg)
+        print(f"\n{msg}")
+        return False
+    
+    logging.info(f"Found {len(matches)} matching template(s) to compare")
+    print(f"\nFound {len(matches)} matching template(s) to compare")
+    
+    # Compare each pair of templates
+    successful_comparisons = 0
+    
+    for import_file, export_file in matches:
+        import_name = os.path.basename(import_file)
+        export_name = os.path.basename(export_file)
+        
+        logging.info(f"Comparing {import_name} with {export_name}...")
+        print(f"\nComparing {import_name} with {export_name}...")
+        
+        # Perform comparison
+        result = compare_arm_templates(import_file, export_file, include_diff=args.include_diff)
+        
+        if result["success"]:
+            # Always save the result to file unless explicitly disabled
+            save_to_file = True if not hasattr(args, 'save_results') else args.save_results
+            
+            # Save and display results
+            summary = save_comparison_result(result, save_to_file=save_to_file)
+            print(f"\n{summary}")
+            
+            # Show detailed differences if requested
+            if result["has_differences"] and args.include_diff:
+                print("\nSample of differences (first 5 per category):")
+                differences = result.get("differences", {})
+                
+                # Show items only in import file
+                import_only = differences.get("import_only", {})
+                if import_only:
+                    print("\nItems only in ARM Import file:")
+                    for i, (key, value) in enumerate(import_only.items()):
+                        if i >= 5:  # Limit to 5 items
+                            print(f"  ... and {len(import_only) - 5} more items")
+                            break
+                        print(f"  {key}")
+                
+                # Show items only in export file
+                export_only = differences.get("export_only", {})
+                if export_only:
+                    print("\nItems only in ARM Export file:")
+                    for i, (key, value) in enumerate(export_only.items()):
+                        if i >= 5:  # Limit to 5 items
+                            print(f"  ... and {len(export_only) - 5} more items")
+                            break
+                        print(f"  {key}")
+                
+                # Show items with different values
+                values_changed = differences.get("values_changed", {})
+                if values_changed:
+                    print("\nItems with different values:")
+                    for i, (key, value) in enumerate(values_changed.items()):
+                        if i >= 5:  # Limit to 5 items
+                            print(f"  ... and {len(values_changed) - 5} more items")
+                            break
+                        print(f"  {key}")
+            
+            successful_comparisons += 1
+        else:
+            error_msg = result.get("error", "Unknown error during comparison")
+            logging.error(f"Failed to compare {import_name} with {export_name}: {error_msg}")
+            print(f"\nError: Failed to compare {import_name} with {export_name}: {error_msg}")
+    
+    if successful_comparisons > 0:
+        print(f"\nSuccessfully compared {successful_comparisons} of {len(matches)} template pairs.")
+        print("\nNote: Resource names are normalized for comparison. For example:")
+        print("  - 'TestEW_VNET00_GLOBAL_POLICY_P01/RCG_Name' is treated as equivalent to:")
+        print("  - '[format('{0}/{1}', 'TestEW_VNET00_GLOBAL_POLICY_P01_20250627_v7wlxg', 'RCG_Name')]'")
+        return True
+    else:
+        print("\nNo templates were successfully compared.")
+        return False
+
+def handle_commit_repository(args):
+    """
+    Handle the commit operation for the repository.
+    
+    This function commits all changes to the Git repository, 
+    prompting the user for a commit message.
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        bool: True if commit was successful, False otherwise
+    """
+    try:
+        logging.info("Starting repository commit...")
+        
+        if args.skip_git:
+            logging.info("Skipping Git operations as requested")
+            print("\nSkipping Git operations as requested via command line flag.")
+            return True
+        
+        # Prompt for commit message
+        if args.non_interactive:
+            commit_message = "Automated commit from Azure Firewall Policy Manager"
+        else:
+            print("\nCommitting changes to Git repository...")
+            
+            # Check if we have firewall export information
+            has_firewall_info = hasattr(args, 'firewall_key')
+            
+            commit_message = input("\nEnter a description for the Git commit (or press Enter to skip): ")
+            if not commit_message:
+                if has_firewall_info:
+                    commit_message = f"Firewall {args.firewall_key}: Manual export"
+                else:
+                    logging.info("Skipping Git commit as no message was provided")
+                    print("\nSkipping Git commit as no message was provided.")
+                    return True
+        
+        # Generate current datetime string
+        from datetime import datetime
+        current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            # Get commit suffix directly from get_id_with_date
+            from src.libraries.CommonUtils import get_id_with_date
+            random_id = get_id_with_date()
+            commit_suffix = None
+            if random_id:
+                id_parts = random_id.split('_')
+                commit_suffix = id_parts[1] if len(id_parts) > 1 else random_id
+            
+            # Format the commit message with datetime and commit_suffix
+            formatted_commit_message = f"[{current_datetime}][{commit_suffix}] {commit_message}"
+            
+            # Commit the changes
+            logging.info(f"Committing changes with message: {formatted_commit_message}")
+            if not args.non_interactive:
+                print(f"\nCommitting changes with message: {formatted_commit_message}")
+            
+            commit_success, git_id = commit_changes_to_git(formatted_commit_message)
+        except ValueError as e:
+            error_message = str(e)
+            logging.error(f"Failed to generate commit ID: {error_message}")
+            if not args.non_interactive:
+                print(f"\nERROR: Failed to generate commit ID: {error_message}")
+                print("\nPlease run a policy sync operation and try again.")
+            return False
+        
+        if commit_success:
+            logging.info(f"Changes committed successfully with ID: {git_id}")
+            if not args.non_interactive:
+                print(f"\nChanges committed successfully with ID: {git_id}")
+            return True
+        else:
+            logging.error("Failed to commit changes to Git repository")
+            if not args.non_interactive:
+                print("\nFailed to commit changes to Git repository. Check the logs for details.")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Error during repository commit: {str(e)}", exc_info=True)
+        if not args.non_interactive:
+            print(f"\nError during repository commit: {str(e)}")
+        return False
+
+

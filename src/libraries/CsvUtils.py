@@ -2,8 +2,8 @@ import os
 import yaml
 import logging
 from jinja2 import Environment, FileSystemLoader
-from scripts.libraries.CommonUtils import load_yaml_file, ensure_list
-from scripts.libraries.Parameters import Paths, Config
+from src.libraries.CommonUtils import load_yaml_file, ensure_list
+from src.libraries.Parameters import Paths, Config
 
 def get_policy_parent(policy_path):
     """Get the parent policy from the main.yaml file."""

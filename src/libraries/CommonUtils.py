@@ -5,6 +5,8 @@ import yaml
 import json
 import shutil
 import stat
+import glob
+import subprocess
 from colorama import Fore, Style, init
 from jinja2 import Environment, FileSystemLoader
 
@@ -149,17 +151,40 @@ def normalize_name(name):
         return ""
     return re.sub(r'[\s\-]+|_-_', '_', name)
 
+def remove_date_suffix(name):
+    """
+    Remove the date suffix from the name.
+    
+    Removes suffix patterns like '_YYYYMMDD' or '-YYYYMMDD_randomstring' 
+    that are often added to resource names in ARM templates.
+    
+    Args:
+        name (str): The name from which to remove the date suffix
+        
+    Returns:
+        str: The name without the date suffix
+    """
+    import re
+    if not name:
+        return ""
+    # Remove _YYYYMMDD pattern
+    name = re.sub(r'_\d{8}$', '', name)
+    # Remove -YYYYMMDD_randomstring pattern (like -20250613_jkn5bz) or _YYYYMMDD_randomstring pattern (like _20250613_jkn5bz)
+    name = re.sub(r'[-_]\d{8}_[a-z0-9]+$', '', name)
+    return name
+
 def commit_changes_to_git(changes_description="Exported Azure Firewall policies to Bicep", with_push=True):
     """
     Commit and push changes to Git repository.
     
     This function performs the following Git operations:
     1. Adds all changes to the staging area
-    2. Creates a commit with a timestamp and description
+    2. Creates a commit with the provided description
     3. Pushes the changes to the remote repository
     
     Args:
-        changes_description (str): Description of the changes made
+        changes_description (str): Description of the changes made. Can include
+                                   formatted datetime and commit_suffix if provided.
         with_push (bool): Whether to push changes to remote repository
     
     Returns:
@@ -171,9 +196,8 @@ def commit_changes_to_git(changes_description="Exported Azure Firewall policies 
     logging.info("Starting Git operations to commit and push changes...")
     
     try:
-        # Get current datetime for the commit message
-        current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        commit_message = f"[{current_datetime}] {changes_description}"
+        # Use the provided commit message as is
+        commit_message = changes_description
         
         # Git add all changes
         logging.info("Adding changes to Git staging area...")
@@ -346,35 +370,165 @@ def get_commit_id_with_date():
     
 def get_id_with_date():
     """
-    Generate a random ID combined with today's date.
+    Generate an ID combined with today's date using the content hash from .sync_lock.
     
     This function:
-    1. Creates a random alphanumeric string of 6 characters
+    1. Reads the content hash from the .sync_lock file and takes the first 6 characters
     2. Combines it with the current date in YYYYMMDD format
     
     Returns:
-        str: Formatted string as 'YYYYMMDD_random6chars' (e.g., '20250612_a7f92b')
+        str: Formatted string as 'YYYYMMDD_hash6chars' (e.g., '20250612_dd3747')
              or None if an error occurs
+    
+    Raises:
+        ValueError: If .sync_lock file doesn't exist or has invalid format
     """
-    import random
-    import string
+    import os
     from datetime import datetime
     
-    logging.info("Generating random ID with date...")
+    logging.info("Generating ID with date from content hash...")
     
     try:
-        # Generate a random string of 6 alphanumeric characters
-        random_chars = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        
         # Get current date in YYYYMMDD format
         date_str = datetime.now().strftime("%Y%m%d")
         
-        # Combine date and random ID
-        result = f"{date_str}_{random_chars}"
-        logging.info(f"Generated random ID with date: {result}")
+        # Path to .sync_lock file at the project root
+        sync_lock_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.sync_lock')
         
-        return result
+        # Read the content hash from .sync_lock
+        if os.path.exists(sync_lock_path):
+            with open(sync_lock_path, 'r') as file:
+                content = file.read().strip()
+                parts = content.split('|')
+                if len(parts) >= 3:
+                    # Extract the content hash (third element) and take first 6 chars
+                    content_hash = parts[2][:6]
+                    # Combine date and content hash
+                    result = f"{date_str}_{content_hash}"
+                    logging.info(f"Generated ID with date and content hash: {result}")
+                    return result
+                else:
+                    error_msg = "Invalid format in .sync_lock file. Please run a policy sync operation to regenerate it."
+                    logging.error(error_msg)
+                    raise ValueError(error_msg)
+        else:
+            error_msg = ".sync_lock file not found. Please run a policy sync operation to generate it."
+            logging.error(error_msg)
+            raise ValueError(error_msg)
         
     except Exception as e:
-        logging.error(f"Error generating random ID: {str(e)}", exc_info=True)
-        return None
+        if isinstance(e, ValueError):
+            # Re-raise ValueError exceptions
+            raise
+        
+        error_msg = f"Error generating ID: {str(e)}. Please run a policy sync operation to resolve this issue."
+        logging.error(error_msg, exc_info=True)
+        raise ValueError(error_msg)
+
+def get_prod_tenant_id():
+    """Get tenant ID from the production firewall in the YAML configuration."""
+    firewalls_dir = os.path.join(get_base_path(), '_firewalls')
+    yaml_files = sorted(glob.glob(os.path.join(firewalls_dir, "*.yaml")))
+    
+    for yaml_file in yaml_files:
+        try:
+            with open(yaml_file, 'r') as f:
+                firewalls = yaml.safe_load(f)
+                if not firewalls:
+                    continue
+                
+                # Find the production firewall
+                for firewall in firewalls:
+                    if firewall.get('regionType') == 'Prod':
+                        return firewall.get('tenantId')
+        except Exception as e:
+            logging.warning(f"Error reading {yaml_file}: {str(e)}")
+            continue
+    
+    return None
+
+def ensure_azure_login():
+    """
+    Ensure user is logged into Azure with the correct tenant and subscription.
+    This function should be called before any Azure CLI operations.
+    """
+    tenant_id = get_prod_tenant_id()
+    if not tenant_id:
+        raise ValueError("Could not find production tenant ID in firewall configuration")
+    
+    try:
+        # First check if already logged in and using correct tenant
+        check_cmd = "az account show --query tenantId -o tsv"
+        result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+        
+        if result.returncode == 0 and result.stdout.strip() == tenant_id:
+            logging.info("Already logged into the correct Azure tenant")
+        else:
+            # If not logged in or wrong tenant, perform login
+            login_cmd = f"az login --tenant {tenant_id}"
+            logging.info(f"Executing Azure login command: {login_cmd}")
+            
+            # Run the login command and capture all output
+            result = subprocess.run(login_cmd, shell=True, capture_output=True, text=True)
+            
+            # Log the complete output for debugging
+            if result.stdout:
+                logging.info(f"Login command stdout:\n{result.stdout}")
+            if result.stderr:
+                logging.warning(f"Login command stderr:\n{result.stderr}")
+                
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, login_cmd, result.stdout, result.stderr)
+            
+            logging.info("Azure login command completed")
+        
+        # List available subscriptions for this tenant
+        list_cmd = f"az account list --query \"[?tenantId=='{tenant_id}']\" -o json"
+        logging.info("Listing available subscriptions...")
+        result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
+        
+        if result.stdout:
+            logging.info(f"Subscription list output:\n{result.stdout}")
+        if result.stderr:
+            logging.warning(f"Subscription list stderr:\n{result.stderr}")
+        
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, list_cmd, result.stdout, result.stderr)
+        
+        subscriptions = json.loads(result.stdout)
+        if not subscriptions:
+            raise ValueError(f"No subscriptions found for tenant {tenant_id}")
+        
+        # Log all available subscriptions
+        logging.info("Available subscriptions:")
+        for sub in subscriptions:
+            logging.info(f"- {sub.get('name')} ({sub.get('id')})")
+        
+        # Select the first available subscription
+        subscription_id = subscriptions[0]['id']
+        subscription_name = subscriptions[0]['name']
+        
+        # Set the active subscription
+        set_cmd = f"az account set --subscription {subscription_id}"
+        logging.info(f"Setting active subscription to: {subscription_name}")
+        result = subprocess.run(set_cmd, shell=True, capture_output=True, text=True)
+        
+        if result.stdout:
+            logging.info(f"Set subscription output:\n{result.stdout}")
+        if result.stderr:
+            logging.warning(f"Set subscription stderr:\n{result.stderr}")
+        
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, set_cmd, result.stdout, result.stderr)
+        
+        logging.info(f"Successfully logged into Azure and set subscription to: {subscription_name}")
+        return True
+            
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Failed to login to Azure: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error during Azure login: {str(e)}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)

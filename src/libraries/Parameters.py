@@ -6,7 +6,7 @@ from pathlib import Path
 import logging
 import glob
 import yaml
-from scripts.libraries.CommonUtils import load_yaml_file, get_base_path, configure_logging
+from src.libraries.CommonUtils import load_yaml_file, get_base_path, configure_logging
 
 ##########################################################################
 # Global Variables
@@ -17,17 +17,17 @@ BASE_PATH = get_base_path()
 # Project directory structure
 class Paths:
     DEFAULT_LOCATION = 'westeurope'
+    # Add BASE_PATH as a class attribute
+    BASE_PATH = BASE_PATH
     # Base directories
-    ARM_DIR = os.path.join(BASE_PATH, 'arm')  # Removed '..' since we're already at root
-    IPGROUPS_DIR = os.path.join(BASE_PATH, '_ipgroups')
+    ARM_DIR = os.path.join(BASE_PATH, 'arm_import')  # ARM import directory
+    ARM_EXPORT_DIR = os.path.join(BASE_PATH, 'arm_export')  # Directory for exported ARM templates
     POLICIES_DIR = os.path.join(BASE_PATH, '_policies')
     CSV_DIR = os.path.join(BASE_PATH, '_csv')
-    TEMPLATES_DIR = os.path.join(BASE_PATH, 'scripts', 'templates')  # Updated path to templates
+    TEMPLATES_DIR = os.path.join(BASE_PATH, 'src', 'templates')  # Templates under src
     BICEP_DIR = os.path.join(BASE_PATH, 'bicep')
     FIREWALLS_DIR = os.path.join(BASE_PATH, '_firewalls')
-    
-    # Config files
-    FW_LIST_JSON = os.path.join(BASE_PATH, 'scripts', 'libraries', 'FWList.js')  # Updated path
+    COMPARISON_DIR = os.path.join(BASE_PATH, 'comparison')  # Directory for comparison results
     
     # ARM template files
     IPGROUPS_JSON = os.path.join(ARM_DIR, 'ipgroups.json')
@@ -39,24 +39,23 @@ class Paths:
     TEMPLATE_APPLICATION = os.path.join(TEMPLATES_DIR, 'application_rules.csv.jinja2')
     TEMPLATE_CSV = os.path.join(TEMPLATES_DIR, 'policy.csv.jinja2')
     TEMPLATE_POLICY_BICEP = os.path.join(TEMPLATES_DIR, 'policy.bicep.jinja2')
-    TEMPLATE_IPGROUPS_BICEP = os.path.join(TEMPLATES_DIR, 'ipgroups.bicep.jinja2')
     TEMPLATE_POLICY_YAML = os.path.join(TEMPLATES_DIR, 'policy.yaml.jinja2')
     TEMPLATE_RCG_YAML = os.path.join(TEMPLATES_DIR, 'rcg.yaml.jinja2')
     TEMPLATE_RC_YAML = os.path.join(TEMPLATES_DIR, 'rc.yaml.jinja2')
 
-    WORKING_DIR = BASE_PATH
-    
     # Ensure all directories exist
     @staticmethod
     def ensure_directories_exist():
         """Create all required directories if they don't exist."""
         directories = [
             Paths.ARM_DIR,
+            Paths.ARM_EXPORT_DIR,
             Paths.IPGROUPS_DIR,
             Paths.POLICIES_DIR,
             Paths.CSV_DIR, 
             Paths.BICEP_DIR,
-            Paths.FIREWALLS_DIR
+            Paths.FIREWALLS_DIR,
+            Paths.COMPARISON_DIR,
         ]
         
         for directory in directories:
@@ -77,7 +76,8 @@ class Config:
     
     # Azure settings
     DEFAULT_LOCATION = os.getenv('AZURE_LOCATION', 'westeurope')
-    DEFAULT_SUBSCRIPTION = os.getenv('AZURE_SUBSCRIPTION_ID', 'bca4dc33-1167-40aa-930c-0c0da34be971')
+    DEFAULT_SUBSCRIPTION = os.getenv('AZURE_SUBSCRIPTION_ID', '00000000-0000-0000-0000-000000000000')
+    DEFAULT_TENANT = os.getenv('AZURE_TENANT_ID', '00000000-0000-0000-0000-000000000000')
 
 ############################################################################
 # In line parameters
@@ -86,46 +86,86 @@ class Config:
 def parse_arguments():
     """Parse command line arguments with detailed help information."""
     parser = argparse.ArgumentParser(
-        description='Azure Firewall Policy Manager',
+        description='''PoliFire (Azure Firewall Policies Infrastructure as Code)
+        
+This tool provides a complete workflow for managing Azure Firewall Policies using YAML files as the source of truth,
+with conversion to/from CSV and ARM/Bicep templates for deployment to Azure. 
+
+AFPIAC stands for "Azure Firewall Policies Infrastructure as Code" - a methodology for managing 
+firewall policies through version-controlled configuration files rather than manual configuration.''',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
+Workflow Overview:
+  1. Maintain firewall policy configurations in YAML files (in _policies/ directory)
+  2. Synchronize between YAML and CSV files for easier editing (operation 4)
+  3. Export to Bicep/ARM templates (operation 5)
+  4. Compare the exported templates with deployed resources (operation 6)
+  5. Deploy updates to Azure (operation 8)
+  6. Commit changes to version control (operation 7)
+
 Examples:
   # List available environments
   python AzFwManager.py --list-environments
   
   # Export policies to Bicep using a specific firewall key
-  python AzFwManager.py --environment Test --operation 4
+  python AzFwManager.py --environment Test --operation 5
   
   # Export policies to Bicep using an index
-  python AzFwManager.py --environment 1 --operation 4
+  python AzFwManager.py --environment 1 --operation 5
   
   # Synchronize policies between YAML and CSV
-  python AzFwManager.py --operation 3
+  python AzFwManager.py --operation 4
   
   # Update your local repository with latest changes
   python AzFwManager.py --operation 1
   
+  # Compare ARM templates between import and export directories
+  python AzFwManager.py --operation 6 --include-diff
+  
+  # Download latest ARM templates from Azure
+  python AzFwManager.py --operation 2 --environment Test
+  
+  # Deploy Bicep templates to Azure
+  python AzFwManager.py --operation 8 --environment Test
+  
+  # Commit changes to Git repository
+  python AzFwManager.py --operation 7 --commit-message "Updated firewall policies"
+  
 Operations:
-  1: Update your local repository from Git
-  2: Import policies from ARM templates
-  3: Synchronize policies between YAML and CSV
-  4: Export policies to Bicep (and optionally deploy)
+  1: Update local Git repository (pull latest changes)
+  2: Download the latest ARM templates from Azure
+  3: Import policies from ARM templates to YAML format
+  4: Synchronize policies between YAML and CSV formats
+  5: Export policies from YAML to Bicep templates
+  6: Compare ARM Templates between Import and Export directories
+  7: Commit all changes to Git repository
+  8: Deploy new Bicep templates to Azure
 ''')
     
     parser.add_argument('--environment', '-e', type=str, metavar='ENV',
-                      help='Specify the firewall key, index, or firewall name')
-    parser.add_argument('--operation', '-o', type=int, choices=[1, 2, 3, 4], metavar='OP',
-                      help='Select operation to perform')
+                        help='Specify the firewall key, index, or firewall name')
+    parser.add_argument('--operation', '-o', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8], metavar='OP',
+                        help='Select operation to perform')
     parser.add_argument('--list-environments', '-l', action='store_true',
-                      help='List available Azure Firewall groups and exit')
+                        help='List available Azure Firewall groups and exit')
+    parser.add_argument('--include-diff', '-d', action='store_true', default=False,
+                        help='Show sample of differences in the console output when comparing ARM templates (for operation 6)')
+    parser.add_argument('--save-results', '-r', action='store_true', default=True,
+                        help='Save comparison results to JSON file with clear import vs export differences (for operation 6). Default is True.')
     parser.add_argument('--non-interactive', '-n', action='store_true',
-                      help='Run in non-interactive mode (requires --environment, --operation and --conflict-resolution)')
+                        help='Run in non-interactive mode (requires --environment, --operation and --conflict-resolution for sync operations)')
     parser.add_argument('--skip-git', '-s', action='store_true',
-                      help='Skip Git operations when exporting policies')
+                        help='Skip Git operations when exporting policies')
     parser.add_argument('--verbose', '-v', action='store_true',
-                      help='Enable verbose output'),
+                        help='Enable verbose output')
     parser.add_argument('--conflict-resolution', '-c', type=str, choices=['policies', 'csv', 'cancel'],
-                      help='Specify how to resolve conflicts in non-interactive mode: "policies" to use YAML policies as source, "csv" to use CSV files as source, or "cancel" to abort')
+                        help='Specify how to resolve conflicts in non-interactive mode: "policies" to use YAML policies as source, "csv" to use CSV files as source, or "cancel" to abort')
+    parser.add_argument('--commit-message', '-m', type=str,
+                        help='Custom commit message when using operation 7 (Commit all changes to Git)')
+    parser.add_argument('--skip-download-prompt', '-p', action='store_true',
+                        help='Skip the prompt to download latest templates when running operation 6 (Compare ARM Templates)')
+    parser.add_argument('--clean-export', action='store_true', default=True,
+                        help='Clean the export directory before generating new ARM templates (for operations 5 and 6). Default is True.')
     
     return parser.parse_args()
 
@@ -265,7 +305,7 @@ def load_firewall_data():
             # Validate each firewall configuration has required fields
             valid_firewalls = []
             for fw in fw_config:
-                required_fields = ["firewallName", "subscriptionId", "ipGroupsResourceGroup", "policiesResourceGroup"]
+                required_fields = ["firewallName", "subscriptionId", "ipGroupsResourceGroup", "policiesResourceGroup", "tenantId", "ipGroupssubscriptionId"]
                 missing_fields = [field for field in required_fields if not fw.get(field)]
                 
                 if missing_fields:
@@ -310,7 +350,8 @@ def load_firewall_data():
                     "subscriptionId": Config.DEFAULT_SUBSCRIPTION,
                     "ipGroupsResourceGroup": "rg-ipgroups",
                     "policiesResourceGroup": "rg-policies",
-                    "regionName": Config.DEFAULT_LOCATION
+                    "regionName": Config.DEFAULT_LOCATION,
+                    "tenantId": Config.DEFAULT_TENANT
                 }]
             })
             
@@ -326,7 +367,8 @@ def load_firewall_data():
                 "subscriptionId": Config.DEFAULT_SUBSCRIPTION,
                 "ipGroupsResourceGroup": "rg-ipgroups",
                 "policiesResourceGroup": "rg-policies",
-                "regionName": Config.DEFAULT_LOCATION
+                "regionName": Config.DEFAULT_LOCATION,
+                "tenantId": Config.DEFAULT_TENANT
             }]
         }]
 
@@ -382,33 +424,6 @@ def get_firewalls_by_key(firewall_key):
             return fw_group.get("Firewalls", [])
     
     return []
-
-def get_firewall_parameters(firewall_name):
-    """
-    Get parameters for a specific firewall by name.
-    
-    Args:
-        firewall_name: Name of the firewall
-        
-    Returns:
-        dict: Dictionary with firewall parameters or None if not found
-    """
-    if not firewall_name or not FIREWALL_DATA:
-        return None
-        
-    for fw_group in FIREWALL_DATA:
-        firewalls = fw_group.get("Firewalls", [])
-        for fw in firewalls:
-            if fw.get("firewallName") == firewall_name:
-                return {
-                    "subscriptionid": fw.get("subscriptionId", Config.DEFAULT_SUBSCRIPTION),
-                    "ipgrouprg": fw.get("ipGroupsResourceGroup", ""),
-                    "policiesrg": fw.get("policiesResourceGroup", ""),
-                    "firewallname": fw.get("firewallName", ""),
-                    "regionName": fw.get("regionName", Config.DEFAULT_LOCATION)
-                }
-    
-    return None
 
 # Initialize paths when module is imported
 try:

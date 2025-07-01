@@ -1,7 +1,66 @@
 # Versions
-## V. 0.14 (20251306)
-- main script in the root
-- changed name of the bicep
+## 0.21 (Enhanced Workflow and Error Handling)
+- Renamed project to PoliFire (Azure Firewall Policies Infrastructure as Code)
+- Added new commit suffix format (`_<datetime>_<six digits>` from `.sync_lock`)
+- Enhanced ARM template comparison workflow:
+  - Added option to download latest templates before comparison
+  - Improved file matching logic and error handling
+  - Added `--skip-download-prompt` flag for automated workflows
+- Added `--clean-export` flag (default: true) to clean export directories before generation
+- Enhanced error handling:
+  - Better handling of missing/invalid `.sync_lock` file
+  - Fixed UnboundLocalError in CompareUtils.py
+  - Added validation for file naming conventions
+- Improved Bicep file handling:
+  - Bicep filenames no longer include commit_suffix
+  - Policy names inside Bicep files maintain suffix for versioning
+- Added new command line arguments:
+  - `--commit-message`: Custom message for git commits
+  - `--skip-download-prompt`: Skip template download prompt
+  - `--clean-export`: Control export directory cleaning
+- Updated documentation and help text with AFPIAC explanation
+- Enhanced logging and user feedback
+- Improved error messages and recovery suggestions
+
+## 0.20 (Folder Structure Reorganization)
+- Renamed `arm` directory to `arm_import` for clarity, storing imported ARM templates
+- Added new `arm_export` directory to store ARM templates generated from Bicep files
+- Added automatic Bicep to ARM template transpilation during export process
+- Fixed indentation issues in ImportUtils.py for improved stability
+- Removed unused parameters from Parameters.py
+- Enhanced code organization and maintainability
+
+## 0.19 (Enhanced Bicep Comparison Tool)
+- Fixed and enhanced the Bicep/ARM template comparison functionality (option 6)
+- Improved file matching logic to handle date-suffixed filenames and naming differences
+- Added smarter normalization for matching files with hyphen/underscore differences
+- Fixed an issue where the comparison was not finding matches for valid files
+- Created a more robust implementation with better error handling
+
+## 0.18 (Enhanced Bicep Comparison Tool)
+- Improved Bicep comparison tool to support non-interactive mode
+- Added command-line parameters for automated comparison without prompts:
+  - `--include-diff` to include unified diff in the output
+  - `--save-results` to save comparison results to files
+- Automatically compares all Bicep files in the `bicep` folder with matching ARM templates in the `arm` folder
+- Updated CLI help documentation with new examples
+
+## 0.17 (Added Bicep Comparison Tool)
+- Added a new tool for intelligent comparison of Bicep files with ARM templates
+- Uses difflib to provide similarity scores and detailed difference reports
+- Integrated as option 6 in the main menu: "Compare Biceps with ARM Templates"
+- Supports saving comparison results to a file
+
+## 0.16 (20252306)
+- removed ipgroups functions
+- download arm templates
+
+## V. 0.15 (20252006)
+- New export workflow: create bicep, git push, deploy
+
+## V. 0.14 (20251806)
+- new version of AzFwManager.exe
+- Resolved naming convention issue with DR
 
 ## V. 0.13 (20250906)
 - new version of FIREWALL_DATA
@@ -73,24 +132,57 @@
 [[_TOC_]]
 
 ## Overview
+
+AFPIAC (Azure Firewall Policies Infrastructure as Code) is a methodology for managing Azure Firewall policies through version-controlled configuration files rather than manual configuration. This project provides a complete workflow for managing Azure Firewall Policies using YAML files as the source of truth, with conversion to/from CSV and ARM/Bicep templates for deployment to Azure.
+
 ### Workflow
+
+The AFPIAC workflow is designed to provide a complete Infrastructure as Code solution for Azure Firewall Policies:
 
 ::: mermaid
 sequenceDiagram
     %% Declare participants in the desired order:
-    participant A as JSON (Arm Template)
-    participant B as YAML
-    participant C as CSV
-    participant D as BICEP
+    participant Azure as Azure
+    participant ARM as ARM Template
+    participant YAML as YAML
+    participant CSV as CSV
+    participant Bicep as Bicep
 
-    %% Process flow messages:
-    A->>B: Export Arm Template to YAML
-    B->>D: Export YAML to BICEP
-
-    %% Bidirectional sync between YAML and CSV:
-    B-->>C: Sync YAML to CSV
-    C-->>B: Sync CSV to YAML
+    %% Download and Import flow:
+    Azure->>ARM: Download Latest (op 2)
+    ARM->>YAML: Import (op 3)
+    
+    %% Bidirectional sync:
+    YAML-->>CSV: Sync (op 4)
+    CSV-->>YAML: Sync (op 4)
+    
+    %% Export and Deploy flow:
+    YAML->>Bicep: Export (op 5)
+    Bicep->>Azure: Deploy (op 8)
+    
+    %% Comparison flow:
+    Bicep->>ARM: Compare (op 6)
+    ARM-->>Azure: Optional Download
+    
+    %% Version Control:
+    Note over YAML,Bicep: Git Operations (op 1, 7)
 :::
+
+Key Operations:
+1. Update local Git repository (pull latest changes)
+2. Download latest ARM templates from Azure
+3. Import policies from ARM templates to YAML
+4. Synchronize between YAML and CSV formats
+5. Export policies from YAML to Bicep
+6. Compare ARM templates (Import vs Export)
+7. Commit changes to Git repository
+8. Deploy Bicep templates to Azure
+
+File Versioning:
+- All resources use a commit suffix format: `_<datetime>_<six digits>`
+- Suffix is generated from `.sync_lock` file
+- Bicep filenames do not include suffix
+- Policy names inside files maintain suffix for versioning
 
 ### AzFwManager.py
 ::: mermaid
@@ -103,79 +195,113 @@ flowchart TD
     E -->|Yes| G{Operation Provided?}
     G -->|No| H[Error: Operation Required]
     G -->|Yes| I{Operation Choice}
-    E -->|No| I{Operation Choice}
-    I -->|1: Update Repository| J[handle_update_repository]
-    I -->|2: Import Policies| K[handle_import_policies]
-    I -->|3: Sync Policies| L[handle_sync_policies]
-    I -->|4: Export Policies| M[handle_export_policies]
+    E -->|No| I{Operation Choice}    I -->|1: Update Repository| J[handle_update_repository]
+    I -->|2: Download ARM Templates| N[handle_download_templates]
+    I -->|3: Import Policies| K[handle_import_policies]
+    I -->|4: Sync Policies| L[handle_sync_policies]
+    I -->|5: Export Policies| M[handle_export_policies]
+    I -->|6: Compare Biceps| O[handle_diff_biceps]
     J --> F
     K --> F
     L --> F
     M --> F
+    N --> F
+    O --> F
 
-    click J call linkCallback("./scripts/libraries/OrchestratorUtils.py#L452")
-    click K call linkCallback("./scripts/libraries/OrchestratorUtils.py#L488")
-    click L call linkCallback("./scripts/libraries/OrchestratorUtils.py#L430")
-    click M call linkCallback("./scripts/libraries/OrchestratorUtils.py#L514")
+    click J call linkCallback("./scripts/libraries/OrchestratorUtils.py#L527")
+    click K call linkCallback("./scripts/libraries/OrchestratorUtils.py#L589")
+    click L call linkCallback("./scripts/libraries/OrchestratorUtils.py#L616")
+    click M call linkCallback("./scripts/libraries/OrchestratorUtils.py#L638")
+    click N call linkCallback("./scripts/libraries/OrchestratorUtils.py#L557")
+    click O call linkCallback("./scripts/libraries/OrchestratorUtils.py#L800")
 :::
 
 
 
 ## Directory Structure
 
-- `_firewalls/`: Contains firewall-related YAML files.
-- `_ipgroups/`: Output folder for `scripts/ImportPolicies.py`. Contains IP groups in YAML format.
-- `_policies/`: Output folder for `scripts/ImportPolicies.py`. Contains Firewall Policies in YAML format.
-- `_csv/`: Output folder for `scripts/ImportPolicies.py`. Contains Firewall Policies in CSV format.
-- `arm/`: Contains the source ARM templates (JSON) for IP groups and Azure Firewall Policies.
-- `bicep/`: Output folder for `scripts/ExportPolicies.py`. Contains Azure Firewall Policies and IP groups in Bicep format.
-- `docs/`: Archive of old documentation and many utility scripts.
-- `env/`: Contains the Python virtual environment.
-- `scripts/`: Main folder for Python scripts, Python libraries, and Jinja2 templates.
+Project Directories:
+- `_firewalls/`: Contains firewall-related YAML configuration files
+- `_policies/`: Contains Firewall Policies in YAML format (source of truth)
+- `_csv/`: Contains Firewall Policies in CSV format (for easy editing)
+- `arm_import/`: Stores downloaded ARM templates from Azure
+- `arm_export/`: Contains ARM templates generated from Bicep files
+- `bicep/`: Contains generated Bicep templates for deployment
+- `comparison/`: Stores comparison results between templates
+- `env/`: Contains the Python virtual environment
+- `src/`: Main source code directory
+  - `libraries/`: Core library modules
+  - `templates/`: Jinja2 templates for file generation
+- `docs/`: Documentation and utility scripts
+
+Key Files:
+- `AzFwManager.py`: Main entry point and CLI interface
+- `.sync_lock`: Contains hash used for generating commit suffixes
+- `requirements.txt`: Python package dependencies
 
 ### Key Scripts & Libraries
 
-- `AzFwManager.py`:  
-  - Main entry point. Parses arguments, manages environment modes, displays menu, and calls:
-    - `handle_update_repository()`  
-    - `handle_import_policies()`  
-    - `handle_sync_policies()`  
-    - `handle_export_policies()`  
-  - These methods reside in **OrchestratorUtils.py**.
+Core Components:
+- `AzFwManager.py`: Main entry point and CLI interface
+  - Parses arguments and manages environment modes
+  - Provides interactive and non-interactive workflows
+  - Integrates all component operations
 
-**Libraries** (located in `scripts/libraries/`) and their actions:
+Libraries (`src/libraries/`):
+- `OrchestratorUtils.py`: Workflow coordination
+  - Manages all operation handlers
+  - Coordinates Git operations
+  - Handles error recovery and user interaction
 
-- `CommonUtils.py`:  
-  - Provides color support using Colorama.  
-  - Contains helper methods (rendering Jinja templates, loading YAML, handling file paths, etc.).
+- `CommonUtils.py`: Core utilities
+  - File and directory management
+  - Template rendering (Jinja2)
+  - Version suffix handling
+  - Error handling and logging
 
-- `Parameters.py`:  
-  - Holds global config, environment parameters, subscription info.  
-  - Parses command-line arguments and manages environment settings.
+- `Parameters.py`: Configuration management
+  - CLI argument parsing
+  - Environment settings
+  - Global configuration
+  - Subscription management
 
-- `SyncUtils.py`:  
-  - Inspects `_policies/` and `_csv/` folders.  
-  - Determines which side is more up-to-date for synchronization.
+- `CompareUtils.py`: Template comparison
+  - ARM template comparison logic
+  - Similarity scoring
+  - Difference reporting
+  - File matching algorithms
 
-- `ImportUtils.py`:  
-  - Imports ARM templates (JSON).  
-  - Converts them into YAML and CSV for firewall policy data.
+- `ImportUtils.py`: Import operations
+  - Downloads ARM templates from Azure
+  - Converts ARM to YAML/CSV
+  - Handles template versioning
 
-- `ExportUtils.py`:  
-  - Reads YAML/CSV to generate Bicep via Jinja templates.  
-  - Outputs Bicep files to the `bicep/` folder.
+- `ExportUtils.py`: Export operations
+  - Generates Bicep from YAML/CSV
+  - Manages export directories
+  - Handles version suffixes
 
-- `DeployUtils.py`:  
-  - Calls `BicepUtils.py` to deploy the generated Bicep files.  
-  - Uses the subscription settings from `Parameters.py`.
+- `BicepUtils.py`: Bicep management
+  - Builds Bicep resources
+  - Manages policy naming
+  - Handles deployment preparation
 
-- `CsvUtils.py`:  
-  - Processes CSV files for firewall policies.  
-  - Applies Jinja templates to produce structured data.
+- `SyncUtils.py`: Synchronization
+  - YAML/CSV synchronization
+  - Conflict resolution
+  - Change detection
 
-- `BicepUtils.py`:  
-  - Builds and deploys Bicep resources for IP groups and firewall policies.  
-  - Ensures correct structure in the final templates.
+- `DeployUtils.py`: Deployment
+  - Bicep deployment to Azure
+  - Environment validation
+  - Deployment monitoring
+
+- `CsvUtils.py`: CSV handling
+  - CSV file processing
+  - Data transformation
+  - Template application
+
+Each library follows SOLID principles and includes comprehensive error handling and logging. All operations support both interactive and non-interactive modes, with appropriate validation and error recovery.
 
 With these scripts and libraries, you can import firewall policy data, transform it between JSON, CSV, and YAML, generate Bicep templates, and deploy everything to Azure.
 
@@ -216,167 +342,96 @@ To exit from the venv env, use this command:
   deactivate
   ```
 
+
 ### Usage
 
-#### STEP 1 - Download IP Groups and Firewall Policies in ARM (json) format
-1. Open the [Azure Portal](https://portal.azure.com) and open the specific Resource Group containing IP Groups or Firewall Policies.
-1. On the left window, navigate to the "Automation" section and click on `Export template`.
-1. In the code view, deselect the "Include parameters" option at the top of the page and wait until the template is created.
-1. Download the template.
-1. Once downloaded, save the file into the `arm/` folder of your local repo. Rename the file as `ipgroups.json` for the IP Groups extraction or `policies.json` for the Firewall Policies extraction.
+This project provides a unified interface for managing Azure Firewall Policies as code, supporting import, export, synchronization, comparison, and deployment operations. All operations can be performed interactively or via command-line arguments for automation.
 
-#### STEP 2 - Run .exe or .py files 
-- First of all you need to login with your Azure credentials and tenant, otherwise the script won't run correctly.
-  Use this command:
+#### 1. Activate the Python Virtual Environment
+
+Before running any scripts, activate the virtual environment and install dependencies (if not already done):
+
+```powershell
+./env/Scripts/Activate.ps1
+pip install -r ./requirements.txt
+```
+
+
+#### 2. Run the Policy Manager
+
+The main entry point is `policiesdeploy.py`. You can run it directly to access an interactive menu, or use command-line arguments for automation.
+
+**Interactive Mode:**
+
+```powershell
+python policiesdeploy.py
+```
+
+You will be presented with a menu to choose from the following operations:
+
+1. Update local Git repository (pull latest changes)
+2. Download the latest ARM templates from Azure
+3. Import policies from ARM templates to YAML/CSV
+4. Synchronize policies between YAML and CSV formats
+5. Export policies from YAML/CSV to Bicep templates
+6. Compare ARM templates (Import vs Export)
+7. Commit all changes to Git
+8. Deploy new Bicep templates to Azure
+
+**Non-Interactive Mode:**
+
+You can automate any operation by specifying the `--operation` parameter (1-8) and other options as needed:
+
+```powershell
+python policiesdeploy.py --operation 5 --environment Test --commit-message "Updated firewall rules"
+```
+
+**Common Command-Line Options:**
+
+- `--operation, -o`: Select operation (1-8)
+- `--environment, -e`: Specify environment (e.g., Test, Prod)
+- `--list-environments, -l`: List available environments
+- `--non-interactive, -n`: Run without prompts
+- `--verbose, -v`: Enable detailed logging
+- `--commit-message, -m`: Custom message for Git commits
+- `--skip-git, -s`: Skip Git operations during export
+- `--conflict-resolution, -c`: Conflict resolution mode for sync (policies/csv/cancel)
+- `--include-diff, -d`: Show detailed diffs in comparison
+- `--save-results, -r`: Save comparison results to files
+- `--skip-download-prompt, -p`: Skip prompt to download latest templates
+- `--clean-export`: Clean export directories before generation (default: true)
+
+#### 4. Example Workflows
+
+- **Import policies from ARM templates:**
   ```powershell
-  az login --tenant "Your tenant ID" 
+  python policiesdeploy.py --operation 3 --environment Test
   ```
 
-WITHOUT PYTHON:
-```powershell
-.\ImportPolicies.exe # import json arm templates into csv and yaml conf files
-.\ExportPolicies.exe # export csv and yaml conf file to bicep files
-```
-
-WITH PYTHON:
-- To run a specific script if you have python, navigate to the `scripts/` directory and execute the script:
-```powershell
-cd scripts
-python3 .\ImportPolicies.py # import json arm templates into csv and yaml conf files
-python3 .\ExportPolicies.py # export csv and yaml conf file to bicep files
-```
-
-##### 1) Run `ImportPolicies`
-- You need to have the correct json files for the import and then check if you put them in the correct folder. 
-- The JSON files must be called `policy.json` and `ipgroup.json`; otherwise, they will not work. 
-- This script extracts JSON data and converts it into YAML and CSV files for use by other scripts.
-- Use this command to run the script:
-
-WITHOUT PYTHON: 
-```powershell
-.\ImportPolicies.exe # import json arm templates into csv and yaml conf files
-```
-
-WITH PYTHON:
-```powershell
-cd scripts
-python3 .\ImportPolicies.py # import json arm templates into csv and yaml conf files
-```
-
-##### 2) Params
-- Before the `ExportPolicies` command, you must set the Prod and Test params in the `Parameter.py` file, inside the `scripts\libraries\` folder.
-- Ensure to change the `subscriptionid`, `ipgrouprg` and `policiesrg` with your specific Subscription ID and Resource Group names.
-```powershell
-# Parameters for test environment
-test = {
-    "subscriptionid": "368f3330-e38a-46e8-b394-7146ab9a0933",
-    "ipgrouprg": "SecInt_IpGroups_DTest",
-    "policiesrg": "SecInt_Policies_DTest",
-    "firewallname": "CGOEW1NW"
-}
-
-# Parameters for production environment
-prod = {
-    "subscriptionid": "prod-12345678-1234-1234-1234-123456789abc",
-    "ipgrouprg": "Prod-Network-AzureFirewall-IaC-IPG-RG",
-    "policiesrg": "Prod-Network-AzureFirewall-IaC-FWP-RG",
-    "firewallname": "PRODFW1"
-}
-```
-
-##### 3) Run `ExportPolicies` and Deploy on Visual Sudio Code's Terminal
-- This script reads YAML files containing IP group information, processes them using a Jinja2 template, and generates a Bicep file for resource definition. After the bicep files are generated, these will be deployed using the local az cli command.
-- Use this command to run the script and to deploy the bicep from Visual Studio Code Terminal:
-
-WITHOUT PYTHON:
-```powershell
-.\ExportPolicies.exe [prod]# export csv and yaml conf file to bicep files
-```
-
-WITH PYTHON:
-```powershell
-cd scripts
-python3 .\ExportPolicies.py [prod]# export csv and yaml conf file to bicep files
-```
-- If you want to deploy the resource on Prod subscription, then add at the end of the previous command: `prod`
-- Otherwise by default the script will deploy on Test subscription.
-
-- N.B. CHECK YOUR CURRENT PATH BEFORE RUNNING THE SCRIPT:  
-
-- Ensure all required directories exist before running the scripts. If not the directories will be generated by the script itself.
-- If necessary, edit the global variables in the Python files to match your deployment architecture on Azure.
-
-
-## Deploy on Azure (Optional alternative)
-
-### Using Azure Command Line Interface (Az CLI)
-
-##### Deployment of the IPGroups 
-- To deploy the IPgroups, select the correct resource group and open the Azure Cloudshell. Select Bash and in "Settings" click on "Go to classic version".
-- Write: code all_ipgroups.bicep
-- Copy the bicep generated from exportipgroups.py and paste in. Save it and press ctrl + q
-- Use this command to start the deploy (change the resource group and the subscription with the correct ones) 
-```sh
-az deployment group create -g "<INSERT_IP_GROUPS_RG>" -o none --subscription "<INSERT_SUBSCRIPTION_ID>" --template-file ipgroups.bicep
-```
-##### Deployment of the Policies 
-- To deploy the Policies, select the correct resource group and open the Azure Cloudshell. Select Bash and in "Settings" click on "Go to classic version".
-- Write: code all_policies.bicep
-- Copy the bicep generated from generate_bicep.py and paste in. Save it and press ctrl + q
-- Use this command to start the deploy (change the resource group and the subscription with the correct ones)
-- deploy firewall policies:
-```sh
-az deployment group create -g "<INSERT_POLICIES_RG>" -o none --subscription "<INSERT_SUBSCRIPTION_ID>" --template-file policies.bicep
-```
-
-## Create new file.exe with python
-- In terminal install pyinstaller with "pip install pyinstaller"
-- Select the correct folder where you want to create the file.exe 
-- Use the command: pyinstaller --onefile --add-data "libraries:libraries" --add-data "templates:templates" ./ImportPolicies.py or ./ExportPolicies.py
-- Get the file.exe and drop it in the scripts folder 
-- Delete the build and dist folder. (unecessary folders)
-- For Export.exe shortcut, in the File Explorer, right-click on the shortcut you just created and select "Properties". In the "Shortcut" tab, locate the "Target" field.
-
--Add the desired environment parameter after the name of the executable.
-For Example:
+- **Export policies to Bicep and deploy:**
   ```powershell
-  C:\Users\YourUsername\path\to\ExportPolicies.exe "mim_prod_ew"
+  python policiesdeploy.py --operation 5 --environment Prod
+  python policiesdeploy.py --operation 8 --environment Prod
   ```
 
-## Structure of FIREWALL_DATA
-```
-FIREWALL_DATA = {
-    {
-	FirewallKey: Test
-	FirewallOrder: 1
-	Firewalls: {
-		{
-			firewallName: TestEW, regionName: westeurope, ...
-		},
-		{
-			firewallName: TestEN, regionName: northeurope, ...
-		}
-	}
-    },
-    {
-	FirewallKey: Prod
-	FirewallOrder: 2
-	Firewalls: {
-		{
-			firewallName: ProdEW, regionName: westeurope, ...
-		},
-		{
-			firewallName: ProdEN, regionName: northeurope, ...
-		}
-	}
-    }
-}
-```
+- **Synchronize YAML and CSV:**
+  ```powershell
+  python policiesdeploy.py --operation 4 --environment Test --conflict-resolution policies
+  ```
 
-## Contributing
+- **Compare Bicep and ARM templates:**
+  ```powershell
+  python policiesdeploy.py --operation 6 --include-diff --save-results
+  ```
 
-Contributions are welcome! Please fork the repository and submit a pull request.
+#### 5. Notes
 
-## License
+- All operations support both interactive and automated workflows.
+- Ensure your environment parameters (subscription, resource groups, etc.) are set correctly in `src/libraries/Parameters.py`.
+- The script will create any missing directories as needed.
+- For advanced usage and troubleshooting, enable verbose mode with `--verbose`.
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+## Bicep Comparison Tool
+
+The project includes a tool for comparing Bicep files with ARM templates to identify differences. This is useful for validating that your Bicep templates will generate the expected ARM templates.
+

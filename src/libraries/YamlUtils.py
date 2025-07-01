@@ -3,11 +3,11 @@ import re
 import logging
 import csv
 from jinja2 import Environment, FileSystemLoader
-from scripts.libraries.CommonUtils import (
+from src.libraries.CommonUtils import (
     load_json_file, load_yaml_file, save_file, clean_directory,
-    normalize_name, ensure_list, get_base_path
+    normalize_name, ensure_list, get_base_path, remove_date_suffix
 )
-from scripts.libraries.Parameters import Paths, Config
+from src.libraries.Parameters import Paths, Config
 
 ###################################################################
 # IPGROUPS
@@ -17,87 +17,43 @@ def format_ip_group(ip_group):
     """
     Format the IP group by extracting the relevant part from the parameter string 
     or full resource path.
+    
+    Args:
+        ip_group (str): The IP group string to format, can be:
+            - A parameter reference: [parameters('NAME')]
+            - A full resource path: /subscriptions/.../ipGroups/NAME
+            - Just the name: NAME
+            
+    Returns:
+        str: The clean IP group name without path or parameters wrapper
     """
-    # Handle the case where the IP group is in the format [parameters('...')]
     if not ip_group:
         return ""
         
+    # Handle the case where the IP group is in the format [parameters('...')]
     param_match = re.match(r"\[parameters\('([^']+)'\)\]", ip_group)
     if param_match:
         ip_group_name = param_match.group(1)
+        # If the parameter value itself is a resource path, extract the name
+        if '/' in ip_group_name:
+            return format_ip_group(ip_group_name)
         return normalize_name(ip_group_name)
     
     # Handle the case where the IP group is a full resource path
-    path_match = re.match(r".*/Microsoft.Network/ipGroups/([^/]+)$", ip_group)
+    # This will match both:
+    # - /subscriptions/.../ipGroups/NAME
+    # - Microsoft.Network/ipGroups/NAME
+    path_match = re.search(r'(?:/ipGroups/|/Microsoft\.Network/ipGroups/)([^/\s]+)(?:\s|$|/|\'|")', ip_group)
     if path_match:
         ip_group_name = path_match.group(1)
         return normalize_name(ip_group_name)
     
-    # Return the original value if no match is found
-    return ip_group
-
-def yaml_create_ipgroups_structure(json_file_path, output_dir):
-    """Create the directory structure and YAML files for IP groups from the JSON data."""
-    logging.info(f"Creating IP groups YAML structure from {json_file_path}")
-    
-    # Load the JSON data
-    data = load_json_file(json_file_path)
-    if not data:
-        return False
-    
-    # Clean the output directory
-    if not clean_directory(output_dir):
-        return False
-    
-    # Extract IP groups from the JSON data
-    ip_groups = []
-    try:
-        ip_groups = [
-            {
-                "name": normalize_name(resource["name"]),
-                "location": resource["location"],
-                "ipAddresses": resource["properties"]["ipAddresses"]
-            }
-            for resource in data["resources"]
-            if resource["type"] == "Microsoft.Network/ipGroups"
-        ]
-    except (KeyError, TypeError) as e:
-        logging.error(f"Error extracting IP groups from JSON: {e}", exc_info=True)
-        return False
-        
-    logging.info(f"Extracted {len(ip_groups)} IP groups from JSON data")
-    
-    # Create a YAML file for each IP group
-    # Use Paths.TEMPLATES_DIR from Parameters.py instead of local TEMPLATES_DIR
-    env = Environment(loader=FileSystemLoader(Paths.TEMPLATES_DIR))
-    template = env.get_template('ipgroups.yaml.jinja2')
-    
-    success_count = 0
-    for group in ip_groups:
-        file_name = group["name"] + '.yaml'
-        file_path = os.path.join(output_dir, file_name)
-        yaml_content = template.render(location=group["location"], ip_addresses=group["ipAddresses"], api_version=Config.FIREWALL_API_VERSION)
-        
-        if save_file(yaml_content, file_path):
-            success_count += 1
-            logging.info(f"Generated YAML file for IP group {group['name']}")
-    
-    if success_count == len(ip_groups):
-        logging.info(f"Successfully created {success_count} IP group YAML files")
-        return True
-    else:
-        logging.warning(f"Created {success_count} of {len(ip_groups)} IP group YAML files")
-        return False
+    # If no special format is detected, just normalize the name
+    return normalize_name(ip_group)
     
 ###################################################################
 # JSON to YAML
 ###################################################################
-
-def remove_date_suffix(name):
-    """Remove the date suffix from the name."""
-    if not name:
-        return ""
-    return re.sub(r'_\d{8}$', '', name)
 
 def extract_base_policy_name(base_policy):
     """Extract the policy name from the basePolicy string."""
@@ -263,120 +219,6 @@ def yaml_create_policies_structure(json_file_path, output_dir):
 ###################################################################
 # CSV to YAML
 ###################################################################
-
-def export_csv_to_yaml():
-    """
-    Export all CSV folders to corresponding YAML folders maintaining the same structure.
-    
-    This function:
-    1. Identifies all timestamp folders in the CSV directory
-    2. Creates corresponding folders in the policies directory
-    3. Processes each CSV folder's files into YAML format
-    
-    Returns:
-        bool: True if export was successful, False otherwise
-    """
-    logging.info("Starting CSV to YAML export for all folders")
-    
-    # Check if CSV directory exists
-    if not os.path.isdir(Paths.CSV_DIR):
-        logging.error(f"CSV directory not found: {Paths.CSV_DIR}")
-        return False
-    
-    # Get all timestamp folders in the CSV directory
-    csv_timestamp_folders = []
-    for folder in os.listdir(Paths.CSV_DIR):
-        folder_path = os.path.join(Paths.CSV_DIR, folder)
-        if os.path.isdir(folder_path) and folder.isdigit() and len(folder) == 14:
-            try:
-                # Validate folder name format (YYYYMMDDHHmmss)
-                from datetime import datetime
-                datetime.strptime(folder, "%Y%m%d%H%M%S")
-                csv_timestamp_folders.append(folder)
-            except ValueError:
-                logging.warning(f"Skipping invalid timestamp folder: {folder}")
-    
-    if not csv_timestamp_folders:
-        logging.warning("No valid CSV timestamp folders found")
-        return False
-    
-    # Set up Jinja environment using centralized template directory
-    env = Environment(loader=FileSystemLoader(Paths.TEMPLATES_DIR))
-    policy_template = env.get_template('policy.yaml.jinja2')
-    rule_collection_group_template = env.get_template('rcg.yaml.jinja2')
-    rule_collection_template = env.get_template('rc.yaml.jinja2')
-    
-    # Process each timestamp folder
-    success_count = 0
-    total_folders = len(csv_timestamp_folders)
-    
-    for timestamp_folder in csv_timestamp_folders:
-        logging.info(f"Processing CSV folder: {timestamp_folder}")
-        
-        csv_folder_path = os.path.join(Paths.CSV_DIR, timestamp_folder)
-        policy_folder_path = os.path.join(Paths.POLICIES_DIR, timestamp_folder)
-        
-        # Create the corresponding policy folder if it doesn't exist
-        try:
-            os.makedirs(policy_folder_path, exist_ok=True)
-        except Exception as e:
-            logging.error(f"Failed to create policy folder {policy_folder_path}: {e}", exc_info=True)
-            continue
-        
-        # Process the CSV files in this folder
-        try:
-            # Dictionary to track policy info for this timestamp
-            policies = {}
-            
-            # Process application rules
-            app_csv_path = find_csv_file(csv_folder_path, "application")
-            if app_csv_path:
-                process_csv_file(app_csv_path, "application", policies)
-            
-            # Process network rules
-            net_csv_path = find_csv_file(csv_folder_path, "network")
-            if net_csv_path:
-                process_csv_file(net_csv_path, "network", policies)
-            
-            # Process NAT rules
-            nat_csv_path = find_csv_file(csv_folder_path, "nat")
-            if nat_csv_path:
-                process_csv_file(nat_csv_path, "nat", policies)
-            
-            # Create policy structure and YAML files
-            create_yaml_from_policies(policies, policy_folder_path)
-            
-            logging.info(f"Successfully processed CSV folder {timestamp_folder}")
-            success_count += 1
-            
-        except Exception as e:
-            logging.error(f"Error processing CSV folder {timestamp_folder}: {e}", exc_info=True)
-            # We don't delete the policy folder as it may contain partial results
-            # which could be useful for debugging
-    
-    if success_count == total_folders:
-        logging.info(f"Successfully exported all {total_folders} CSV folders to YAML")
-        return True
-    else:
-        logging.warning(f"Exported {success_count} out of {total_folders} CSV folders to YAML")
-        return success_count > 0  # Return True if at least one folder was processed successfully
-
-def find_csv_file(folder_path, rule_type):
-    """
-    Find a CSV file in the folder that matches the rule type.
-    
-    Args:
-        folder_path (str): Path to search for CSV files
-        rule_type (str): Type of rules ('application', 'network', 'nat')
-    
-    Returns:
-        str: Path to the CSV file if found, None otherwise
-    """
-    for file in os.listdir(folder_path):
-        if file.endswith('.csv') and rule_type.lower() in file.lower():
-            return os.path.join(folder_path, file)
-    logging.warning(f"No {rule_type} CSV file found in {folder_path}")
-    return None
 
 def process_csv_file(csv_path, rule_type, policies):
     """
@@ -643,3 +485,51 @@ def transform_rule_data(rule):
         ]
     
     return transformed_rule
+
+def compare_policy_sets(arm_files):
+    """
+    Compare existing policies in _policies directory with policies to be imported from ARM templates.
+    
+    Args:
+        arm_files: List of ARM template files to be imported
+        
+    Returns:
+        tuple: (differences, existing_policies, new_policies) where:
+            - differences is a dictionary with 'removed', 'added', and 'common' policies
+            - existing_policies is a set of current policy names
+            - new_policies is a set of policy names to be imported
+    """
+    # Get existing policies
+    existing_policies = set()
+    if os.path.exists(Paths.POLICIES_DIR):
+        for item in os.listdir(Paths.POLICIES_DIR):
+            if os.path.isdir(os.path.join(Paths.POLICIES_DIR, item)):
+                existing_policies.add(item)
+      # Get policies from ARM templates
+    new_policies = set()
+    for arm_file in arm_files:
+        try:
+            data = load_json_file(arm_file)
+            if not data:
+                continue
+                
+            for resource in data.get('resources', []):
+                if resource['type'] == 'Microsoft.Network/firewallPolicies':
+                    policy_name = resource['name']
+                    # If name has version suffix, remove it
+                    policy_name = remove_date_suffix(policy_name)
+                    policy_name = normalize_name(policy_name)
+                    new_policies.add(policy_name)
+                    break  # Found the main policy resource, no need to continue
+        except Exception as e:
+            logging.error(f"Error analyzing ARM template {arm_file}: {str(e)}")
+            continue
+    
+    # Calculate differences
+    differences = {
+        'removed': existing_policies - new_policies,  # Policies that exist but won't be in new import
+        'added': new_policies - existing_policies,    # New policies that don't exist currently
+        'common': existing_policies & new_policies    # Policies that exist and will be updated
+    }
+    
+    return differences, existing_policies, new_policies
