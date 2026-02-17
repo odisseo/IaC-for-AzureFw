@@ -1,3 +1,4 @@
+{% import '_macros.jinja2' as m -%}
 PolicyName;ParentPolicy;RuleCollectionGroup;RuleCollectionGroupPriority;RuleCollection;RuleCollectionPriority;RuleCollectionType;RuleCollectionAction;RuleName;RuleType;
 {%- if rule_type == "NetworkRule" -%}
 IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;DestinationFqdns;DestinationPorts;Notes
@@ -7,12 +8,16 @@ IpProtocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationPorts
 Protocols;SourceAddresses;SourceIpGroups;DestinationAddresses;DestinationIpGroups;TargetFqdns;TargetUrls;FqdnTags;WebCategories;TerminateTLS;HttpHeadersToInsert;Notes
 {%- endif %}
 {% for resource in resources -%}
+{%- if resource.policyParent is mapping -%}
+{{ resource.policyName }};{{ resource.policyParent.id }};{{ resource.ruleCollectionGroup }};{{ resource.ruleCollectionGroupPriority }};{{ resource.ruleCollection }};{{ resource.ruleCollectionPriority }};{{ resource.ruleCollectionType }};{{ resource.ruleCollectionAction }};{{ resource.name }};{{ resource.ruleType }};
+{%- else -%}
 {{ resource.policyName }};{{ resource.policyParent }};{{ resource.ruleCollectionGroup }};{{ resource.ruleCollectionGroupPriority }};{{ resource.ruleCollection }};{{ resource.ruleCollectionPriority }};{{ resource.ruleCollectionType }};{{ resource.ruleCollectionAction }};{{ resource.name }};{{ resource.ruleType }};
+{%- endif -%}
 {%- if rule_type == "NetworkRule" -%}
-{{ resource.ipProtocols|safe_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationIpGroups|safe_join }};{{ resource.destinationFqdns|safe_join }};{{ resource.destinationPorts|dollar_join }};{{ resource.notes }}
+{{ m.safe_join(resource.ipProtocols) }};{{ m.safe_join(resource.sourceAddresses) }};{{ m.safe_join(resource.sourceIpGroups) }};{{ m.safe_join(resource.destinationAddresses) }};{{ m.safe_join(resource.destinationIpGroups) }};{{ m.safe_join(resource.destinationFqdns) }};{{ m.dollar_join(resource.destinationPorts) }};{{ resource.notes }}
 {%- elif rule_type == "NatRule" -%}
-{{ resource.ipProtocols|safe_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationPorts|dollar_join }};{{ resource.translatedAddress }};{{ resource.translatedFqdn }};{{ resource.translatedPort }};{{ resource.notes }}
+{{ m.safe_join(resource.ipProtocols) }};{{ m.safe_join(resource.sourceAddresses) }};{{ m.safe_join(resource.sourceIpGroups) }};{{ m.safe_join(resource.destinationAddresses) }};{{ m.dollar_join(resource.destinationPorts) }};{{ resource.translatedAddress }};{{ resource.translatedFqdn }};{{ resource.translatedPort }};{{ resource.notes }}
 {%- elif rule_type == "ApplicationRule" -%}
-{{ resource.protocols|protocol_join }};{{ resource.sourceAddresses|safe_join }};{{ resource.sourceIpGroups|safe_join }};{{ resource.destinationAddresses|safe_join }};{{ resource.destinationIpGroups|safe_join }};{{ resource.targetFqdns|safe_join }};{{ resource.targetUrls|safe_join }};{{ resource.fqdnTags|safe_join }};{{ resource.webCategories|safe_join }};{{ resource.terminateTLS }};{{ resource.httpHeadersToInsert|header_join }};{{ resource.notes }}
+{{ m.protocol_join(resource.protocols) }};{{ m.safe_join(resource.sourceAddresses) }};{{ m.safe_join(resource.sourceIpGroups) }};{{ m.safe_join(resource.destinationAddresses) }};{{ m.safe_join(resource.destinationIpGroups) }};{{ m.safe_join(resource.targetFqdns) }};{{ m.safe_join(resource.targetUrls) }};{{ m.safe_join(resource.fqdnTags) }};{{ m.safe_join(resource.webCategories) }};{{ resource.terminateTLS }};{{ m.header_join(resource.httpHeadersToInsert) }};{{ resource.notes }}
 {%- endif %}
 {% endfor -%}

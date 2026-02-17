@@ -1,16 +1,51 @@
-type: Microsoft.Network/firewallPolicies
-apiVersion: {{ api_version }}
-location: westeurope
+type: 'Microsoft.Network/firewallPolicies'
+apiVersion: '{{ api_version }}'
+location: 'westeurope'
 tags:
-  scope: Azure Firewall Enviroment
-  team: Network
-  Role: Network management
+{%- if tags %}
+{%- for tag_key, tag_value in tags.items() %}
+  {{ tag_key }}: '{{ tag_value }}'
+{%- endfor %}
+{%- else %}
+  scope: 'Azure Firewall Environment'
+  team: 'Network'
+  role: 'Network management'
+{%- endif %}
 properties:
-  basePolicy: {{ base_policy }}
+{%- if base_policy_name %}
+  basePolicyName: '{{ base_policy_name }}'
+  basePolicyVersion: '{{ base_policy_version }}'
+{%- endif %}
   sku:
-    tier: Premium
-  threatIntelMode: Alert
+    tier: 'Premium'
+  threatIntelMode: 'Alert'
   dnsSettings:
     servers: []
     enableProxy: true
+{%- if snat is not none %}
+  snat:
+{%- if snat.get('privateRanges') is not none %}
+    privateRanges:
+{%- if snat.privateRanges %}
+{%- for ip_range in snat.privateRanges %}
+      - '{{ ip_range }}'
+{%- endfor %}
+{%- else %}
+      []
+{%- endif %}
+{%- endif %}
+{%- if snat.get('autoLearnPrivateRanges') %}
+    autoLearnPrivateRanges: '{{ snat.autoLearnPrivateRanges }}'
+{%- endif %}
+{%- endif %}
+{%- if insights %}
+  insight:
+    enabled: '{{ insights.isEnabled | default(insights.enabled) | lower }}'
+    retentionDays: {{ insights.retentionDays }}
+{%- if insights.logAnalyticsResources and insights.logAnalyticsResources.defaultWorkspaceId %}
+    defaultWorkspaceId: '{{ insights.logAnalyticsResources.defaultWorkspaceId.id }}'
+{%- elif insights.defaultWorkspaceId %}
+    defaultWorkspaceId: '{{ insights.defaultWorkspaceId }}'
+{%- endif %}
+{%- endif %}
 terms: []

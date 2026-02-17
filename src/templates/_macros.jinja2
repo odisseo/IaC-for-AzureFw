@@ -80,3 +80,51 @@
     {%- endfor -%}
   {%- endif -%}]
 {%- endmacro %}
+
+{# CSV formatting macros #}
+
+{% macro safe_join(value) -%}
+  {%- if value is none -%}
+  {%- elif value is iterable and value is not string -%}
+    {%- for item in value -%}
+      {{ item }}
+      {%- if not loop.last %},{% endif -%}
+    {%- endfor -%}
+  {%- else -%}
+    {{ value }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro dollar_join(value) -%}
+  {%- if value is none -%}
+  {%- elif value is iterable and value is not string -%}
+    {%- for item in value -%}
+      {{ item }}
+      {%- if not loop.last %}${% endif -%}
+    {%- endfor -%}
+  {%- else -%}
+    {{ value }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro protocol_join(protocols) -%}
+  {%- if protocols -%}
+    {%- for p in protocols -%}
+      {%- if p is mapping and 'protocolType' in p and 'port' in p -%}
+        {{ p.protocolType }}:{{ p.port }}
+        {%- if not loop.last %},{% endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro header_join(headers) -%}
+  {%- if headers -%}
+    {%- for h in headers -%}
+      {%- if h is mapping and 'header' in h and 'value' in h -%}
+        {{ h.header }}={{ h.value }}
+        {%- if not loop.last %},{% endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro %}

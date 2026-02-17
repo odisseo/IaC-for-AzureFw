@@ -1,891 +1,529 @@
 """
 Comparison utilities for Azure Firewall Policy Manager.
 
-This module provides the functionality for comparing ARM templates between imported and exported versions.
+This module provides the functionality for comparing local YAML policies with Azure-deployed policies.
+Uses identity-based matching with priority-prefix parsing.
 """
+
 import os
+import re
 import json
 import logging
-import re
-import subprocess
+import yaml
 from datetime import datetime
 from deepdiff import DeepDiff
-from src.libraries.Parameters import Paths, Config
-from src.libraries.CommonUtils import remove_date_suffix, clean_directory, ensure_azure_login
+from jinja2 import Environment, FileSystemLoader
+from src.libraries.CommonUtils import CommonFile, CommonData
+from src.libraries.Parameters import Paths
 
-def transpile_bicep_to_arm(bicep_file, arm_output_dir):
-    """
-    Transpile a Bicep file to an ARM template using the Azure CLI.
-    
-    Args:
-        bicep_file: Path to the Bicep file
-        arm_output_dir: Directory where the ARM template will be saved
-        
-    Returns:
-        tuple: (success, output_file_path) where success is a boolean and
-               output_file_path is the path to the generated ARM template
-    """
-    logging.info("Ensuring Azure authentication before transpiling Bicep...")
-    ensure_azure_login()
-    
-    try:
-        # Extract the filename without extension
-        file_name = os.path.basename(bicep_file)
-        file_name_no_ext = os.path.splitext(file_name)[0]
-        
-        # Define the output ARM template path
-        arm_file_path = os.path.join(arm_output_dir, f"{file_name_no_ext}.json")
-        
-        # Build the az bicep build command
-        command = f'az bicep build --file "{bicep_file}" --outfile "{arm_file_path}"'
-        
-        # Execute the command
-        logging.info(f"Transpiling Bicep to ARM template: {bicep_file}")
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-        
-        # Check if the output file was created
-        if os.path.exists(arm_file_path):
-            logging.info(f"Successfully transpiled Bicep to ARM template: {arm_file_path}")
-            return True, arm_file_path
-        else:
-            logging.error(f"ARM template file not created: {arm_file_path}")
-            return False, None
-            
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error transpiling Bicep to ARM template: {str(e)}")
-        logging.error(f"Command output: {e.stdout}")
-        logging.error(f"Command error: {e.stderr}")
-        
-        # Check for common errors and provide more helpful messages
-        if "'az' is not recognized" in e.stderr:
-            logging.error("Azure CLI ('az') is not installed or not in the PATH. Please install Azure CLI or add it to the PATH.")
-        elif "bicep build" in e.stderr and "is not a valid" in e.stderr:
-            logging.error("Azure CLI Bicep extension is not installed. Please run 'az bicep install' to install it.")
-        
-        return False, None
-    except FileNotFoundError:
-        logging.error("Azure CLI ('az') is not installed or not in the PATH. Please install Azure CLI or add it to the PATH.")
-        return False, None
-    except Exception as e:
-        logging.error(f"Unexpected error transpiling Bicep to ARM template: {str(e)}")
-        return False, None
+##########################################################################
+# Rule Normalization Helper
+##########################################################################
 
-def load_json_file(file_path):
+def normalize_rule(rule):
     """
-    Load a JSON file and return its contents.
+    Normalize a rule to a canonical format for comparison.
+    This ensures both ARM and YAML rules have the same structure.
     
-    Args:
-        file_path (str): Path to the JSON file
-        
-    Returns:
-        dict: The contents of the JSON file or None if the file cannot be loaded
+    - Converts None to [] for array fields
+    - Sorts array values for consistent comparison
+    - Extracts only meaningful fields
     """
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
-        logging.error(f"Failed to load JSON file {file_path}: {str(e)}")
-        return None
-
-def normalize_resource_name(name_value):
-    """
-    Normalize a resource name by converting format expressions to plain strings.
+    # Define array fields that should be [] not None, containing strings
+    string_array_fields = [
+        'ipProtocols', 'sourceAddresses', 'sourceIpGroups', 
+        'destinationAddresses', 'destinationIpGroups', 'destinationFqdns',
+        'destinationPorts', 'targetFqdns', 'targetUrls',
+        'fqdnTags', 'webCategories'
+    ]
     
-    Args:
-        name_value (str): The resource name value to normalize
-        
-    Returns:
-        str: The normalized resource name
-    """
-    if not isinstance(name_value, str):
-        return name_value
+    # Array fields containing dicts (can't be sorted by value directly)
+    dict_array_fields = ['protocols', 'httpHeadersToInsert']
     
-    # Check if the name is a format expression like:
-    # [format('{0}/{1}', 'TestEW_VNET00_GLOBAL_POLICY_P01_20250627_v7wlxg', '00260_AZURE_SERVICES_TAGS_RCG')]
-    format_pattern = r'\[format\(\s*[\'"]([^\'"]*)[\'"]\s*,\s*[\'"]([^\'"]*)[\'"](?:\s*,\s*[\'"]([^\'"]*)[\'"])*\s*\)\]'
+    def normalize_value(value):
+        """Normalize None/null to empty list."""
+        if value is None:
+            return []
+        return value
     
-    match = re.match(format_pattern, name_value)
-    if match:
-        # Extract format string and parameters
-        format_str = match.group(1)
-        params = [match.group(2)]
-        
-        # Add additional parameters if they exist
-        if match.group(3):
-            params.append(match.group(3))
-        
-        # Replace placeholders in format string with parameters
-        result = format_str
-        for i, param in enumerate(params):
-            result = result.replace(f'{{{i}}}', param)
-        
-        return result
-    
-    # Remove date suffixes from resource names for better matching
-    # Example: TestEW_VNET00_GLOBAL_POLICY_P01_20250627_v7wlxg
-    return remove_date_suffix(name_value)
-
-def normalize_resource_names_in_json(json_data):
-    """
-    Recursively normalize resource names in a JSON object.
-    
-    Args:
-        json_data: The JSON data to normalize
-        
-    Returns:
-        The JSON data with normalized resource names
-    """
-    if isinstance(json_data, dict):
-        result = {}
-        for key, value in json_data.items():
-            # If the key is 'name', normalize the value
-            if key == 'name':
-                result[key] = normalize_resource_name(value)
-            else:
-                result[key] = normalize_resource_names_in_json(value)
-        return result
-    elif isinstance(json_data, list):
-        return [normalize_resource_names_in_json(item) for item in json_data]
-    else:
-        return json_data
-
-def normalize_keys_for_comparison(json_data):
-    """
-    Normalize JSON data for comparison by sorting arrays and dictionaries.
-    
-    Args:
-        json_data: The JSON data to normalize
-        
-    Returns:
-        The normalized JSON data
-    """
-    if isinstance(json_data, dict):
-        return {k: normalize_keys_for_comparison(v) for k, v in sorted(json_data.items())}
-    elif isinstance(json_data, list):
-        # For lists of dictionaries, try to sort them by a common key
-        if all(isinstance(item, dict) for item in json_data):
-            # Try to find a common key to sort by
-            common_keys = set.intersection(*[set(item.keys()) for item in json_data]) if json_data else set()
-            priority_keys = ['name', 'id', 'type']
-            sort_key = next((k for k in priority_keys if k in common_keys), None)
-            
-            if sort_key:
-                sorted_list = sorted(json_data, key=lambda x: x.get(sort_key, ''))
-                return [normalize_keys_for_comparison(item) for item in sorted_list]
-        
-        # If not a list of dictionaries or no common key, just normalize each item
-        return [normalize_keys_for_comparison(item) for item in json_data]
-    else:
-        return json_data
-
-def get_resource_display_name(resource):
-    """
-    Get a human-readable display name for a resource.
-    
-    Args:
-        resource (dict): A resource object
-        
-    Returns:
-        str: A display name for the resource
-    """
-    if not isinstance(resource, dict):
-        return "Unknown"
-    
-    name = resource.get('name', 'Unknown')
-    
-    # If it's a format expression, try to extract a more readable name
-    if isinstance(name, str) and name.startswith('[format('):
-        normalized = normalize_resource_name(name)
-        return normalized
-    
-    return name
-
-def compare_arm_templates(import_file, export_file, include_diff=False):
-    """
-    Compare two ARM templates and return the differences.
-    
-    Args:
-        import_file (str): Path to the imported ARM template
-        export_file (str): Path to the exported ARM template
-        include_diff (bool): Whether to include the full diff in the output
-        
-    Returns:
-        dict: A dictionary with comparison results
-    """
-    # Load JSON files
-    import_data = load_json_file(import_file)
-    export_data = load_json_file(export_file)
-    
-    if not import_data or not export_data:
-        return {
-            "success": False,
-            "error": "Failed to load one or both JSON files",
-            "import_file": import_file,
-            "export_file": export_file,
-            "import_data_loaded": import_data is not None,
-            "export_data_loaded": export_data is not None
-        }
-    
-    # First normalize resource names to handle format expressions
-    import_normalized_names = normalize_resource_names_in_json(import_data)
-    export_normalized_names = normalize_resource_names_in_json(export_data)
-    
-    # Make deep copies to avoid modifying the originals
-    import_normalized_copy = dict(import_normalized_names)
-    export_normalized_copy = dict(export_normalized_names)
-    
-    # Handle resources separately for better matching
-    import_resources = import_normalized_copy.pop('resources', []) if 'resources' in import_normalized_copy else []
-    export_resources = export_normalized_copy.pop('resources', []) if 'resources' in export_normalized_copy else []
-    
-    # Then normalize JSON data for comparison (sorting, etc.)
-    import_normalized = normalize_keys_for_comparison(import_normalized_copy)
-    export_normalized = normalize_keys_for_comparison(export_normalized_copy)
-    
-    # Compare the normalized data (excluding resources)
-    diff = DeepDiff(import_normalized, export_normalized, 
-                   ignore_order=True, 
-                   report_repetition=True,
-                   verbose_level=2)
-    
-    # Categorize differences by file (import vs export)
-    import_only = {}
-    export_only = {}
-    values_changed = {}
-    
-    # Process differences (non-resource differences)
-    if "dictionary_item_added" in diff:
-        for key, value in diff["dictionary_item_added"].items():
-            export_only[key] = value
-            
-    if "dictionary_item_removed" in diff:
-        for key, value in diff["dictionary_item_removed"].items():
-            import_only[key] = value
-            
-    if "values_changed" in diff:
-        for key, value in diff["values_changed"].items():
-            values_changed[key] = {
-                "import": value["old_value"],
-                "export": value["new_value"]
-            }
-    
-    # Process array differences (except resources which are handled separately)
-    if "iterable_item_added" in diff:
-        for key, value in diff["iterable_item_added"].items():
-            export_only[key] = value
-            
-    if "iterable_item_removed" in diff:
-        for key, value in diff["iterable_item_removed"].items():
-            import_only[key] = value
-    
-    # Special handling for resources
-    resource_diff = compare_resource_collections(import_resources, export_resources)
-    
-    # Format resource differences for better readability
-    formatted_import_only = {}
-    formatted_export_only = {}
-    formatted_values_changed = {}
-    
-    # Format import-only resources
-    for res_id, resource in resource_diff['import_only'].items():
-        display_name = get_resource_display_name(resource)
-        formatted_import_only[display_name] = resource
-    
-    # Format export-only resources
-    for res_id, resource in resource_diff['export_only'].items():
-        display_name = get_resource_display_name(resource)
-        formatted_export_only[display_name] = resource
-    
-    # Format changed resources
-    for res_id, change_data in resource_diff['values_changed'].items():
-        import_display = change_data['import']['name']
-        export_display = change_data['export']['name']
-        
-        # Use a common display name if possible, otherwise show both
-        if normalize_resource_name(import_display) == normalize_resource_name(export_display):
-            display_name = normalize_resource_name(import_display)
-        else:
-            display_name = f"{import_display} <-> {export_display}"
-        
-        formatted_values_changed[display_name] = {
-            "import": change_data['import']['content'],
-            "export": change_data['export']['content'],
-            "diff": change_data['diff']
-        }
-    
-    # Add resource differences to the overall differences
-    if formatted_import_only:
-        import_only['resources'] = formatted_import_only
-    
-    if formatted_export_only:
-        export_only['resources'] = formatted_export_only
-    
-    if formatted_values_changed:
-        values_changed['resources'] = formatted_values_changed
-    
-    has_differences = bool(diff) or bool(resource_diff['import_only']) or bool(resource_diff['export_only']) or bool(resource_diff['values_changed'])
-    
-    # Prepare result
-    result = {
-        "success": True,
-        "has_differences": has_differences,
-        "import_file": import_file,
-        "export_file": export_file,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    normalized = {
+        'name': rule.get('name', ''),
+        'ruleType': rule.get('ruleType', '')
     }
     
-    # Add categorized differences
-    if has_differences:
-        result["differences"] = {
-            "import_only": import_only,
-            "export_only": export_only,
-            "values_changed": values_changed,
-            "raw_diff": diff.to_dict() if include_diff else None
-        }
+    # Copy all fields, normalizing arrays
+    for key, value in rule.items():
+        if key in ['name', 'ruleType']:
+            continue
+        if key in string_array_fields:
+            val = normalize_value(value)
+            normalized[key] = sorted(val) if val else []
+        elif key in dict_array_fields:
+            val = normalize_value(value)
+            # Sort dicts by their string representation for consistent comparison
+            normalized[key] = sorted(val, key=lambda x: json.dumps(x, sort_keys=True)) if val else []
+        else:
+            # Normalize None to appropriate defaults
+            if value is None:
+                normalized[key] = False if key in ['terminateTLS'] else value
+            else:
+                normalized[key] = value
     
-    return result
+    return normalized
 
-def save_comparison_result(result, save_to_file=True):
+
+def compare_rules(azure_rule, local_rule):
     """
-    Save the comparison result to a file and return a summary.
+    Compare two normalized rules field by field.
     
-    Args:
-        result (dict): The comparison result
-        save_to_file (bool): Whether to save the result to a file
-        
     Returns:
-        str: A summary of the comparison result
+        list: List of differences found, empty if rules are identical
     """
-    if not result.get("success", False):
-        return f"Comparison failed: {result.get('error', 'Unknown error')}"
+    differences = []
+    all_keys = set(azure_rule.keys()) | set(local_rule.keys())
     
-    # Extract file names for the output file name
-    import_file_name = os.path.basename(result["import_file"])
-    export_file_name = os.path.basename(result["export_file"])
+    for key in sorted(all_keys):
+        azure_val = azure_rule.get(key)
+        local_val = local_rule.get(key)
+        
+        # Normalize None to [] for comparison
+        if azure_val is None:
+            azure_val = []
+        if local_val is None:
+            local_val = []
+        
+        # Sort arrays for comparison
+        if isinstance(azure_val, list) and isinstance(local_val, list):
+            try:
+                azure_sorted = sorted(azure_val, key=lambda x: json.dumps(x, sort_keys=True) if isinstance(x, dict) else str(x))
+                local_sorted = sorted(local_val, key=lambda x: json.dumps(x, sort_keys=True) if isinstance(x, dict) else str(x))
+                if azure_sorted != local_sorted:
+                    differences.append({
+                        'field': key,
+                        'azure_value': azure_val,
+                        'local_value': local_val
+                    })
+            except:
+                if azure_val != local_val:
+                    differences.append({
+                        'field': key,
+                        'azure_value': azure_val,
+                        'local_value': local_val
+                    })
+        elif azure_val != local_val:
+            differences.append({
+                'field': key,
+                'azure_value': azure_val,
+                'local_value': local_val
+            })
     
-    # Create a summary
-    if result["has_differences"]:
-        differences = result.get("differences", {})
-        summary = f"Differences found between {import_file_name} and {export_file_name}"
+    return differences
+
+
+##########################################################################
+# ComparePolicy Class
+##########################################################################
+
+class ComparePolicy:
+    """Policy comparison utilities class."""
+
+    @staticmethod
+    def normalize_arm_template(arm_file_path):
+        """
+        Normalize ARM template JSON to standard policy structure.
         
-        # Count regular differences (non-resource differences)
-        regular_import_only = {k: v for k, v in differences.get("import_only", {}).items() if k != 'resources'}
-        regular_export_only = {k: v for k, v in differences.get("export_only", {}).items() if k != 'resources'}
-        regular_values_changed = {k: v for k, v in differences.get("values_changed", {}).items() if k != 'resources'}
+        Reads ARM JSON, extracts policy and rule collection groups,
+        and returns normalized structure with priority parsing.
         
-        import_only_count = len(regular_import_only)
-        export_only_count = len(regular_export_only)
-        values_changed_count = len(regular_values_changed)
-        
-        # Count resource differences
-        resources_import_only = differences.get("import_only", {}).get("resources", {})
-        resources_export_only = differences.get("export_only", {}).get("resources", {})
-        resources_values_changed = differences.get("values_changed", {}).get("resources", {})
-        
-        import_only_resources_count = len(resources_import_only)
-        export_only_resources_count = len(resources_export_only)
-        changed_resources_count = len(resources_values_changed)
-        
-        # Add summary counts for non-resource differences
-        if import_only_count > 0 or export_only_count > 0 or values_changed_count > 0:
-            summary += "\n\nGeneral differences:"
-            if import_only_count > 0:
-                summary += f"\n - Items only in ARM Import file: {import_only_count}"
-            if export_only_count > 0:
-                summary += f"\n - Items only in ARM Export file: {export_only_count}"
-            if values_changed_count > 0:
-                summary += f"\n - Items with different values: {values_changed_count}"
-        
-        # Add resource-specific summary
-        if import_only_resources_count > 0 or export_only_resources_count > 0 or changed_resources_count > 0:
-            summary += "\n\nResource differences:"
+        Args:
+            arm_file_path (str): Path to ARM JSON file
             
-            # Add resource counts
-            if import_only_resources_count > 0:
-                summary += f"\n - Resources only in ARM Import file: {import_only_resources_count}"
-            if export_only_resources_count > 0:
-                summary += f"\n - Resources only in ARM Export file: {export_only_resources_count}"
-            if changed_resources_count > 0:
-                summary += f"\n - Resources with different content: {changed_resources_count}"
-            
-            # List examples of resource differences
-            if import_only_resources_count > 0:
-                summary += "\n\nExamples of resources only in Import file:"
-                for i, name in enumerate(list(resources_import_only.keys())[:3]):  # Show up to 3 examples
-                    summary += f"\n - {name}"
-                if import_only_resources_count > 3:
-                    summary += f"\n   ... and {import_only_resources_count - 3} more"
-            
-            if export_only_resources_count > 0:
-                summary += "\n\nExamples of resources only in Export file:"
-                for i, name in enumerate(list(resources_export_only.keys())[:3]):  # Show up to 3 examples
-                    summary += f"\n - {name}"
-                if export_only_resources_count > 3:
-                    summary += f"\n   ... and {export_only_resources_count - 3} more"
-            
-            if changed_resources_count > 0:
-                summary += "\n\nExamples of resources with different content:"
-                for i, name in enumerate(list(resources_values_changed.keys())[:3]):  # Show up to 3 examples
-                    summary += f"\n - {name}"
-                if changed_resources_count > 3:
-                    summary += f"\n   ... and {changed_resources_count - 3} more"
-        
-        # Add info about name normalization
-        summary += "\n\nNote: Resource names have been normalized for comparison:"
-        summary += "\n - Format expressions like [format('{0}/{1}', 'Policy_20250627_v7wlxg', 'RCG_Name')] are"
-        summary += "\n   treated as equivalent to 'Policy/RCG_Name'"
-        summary += "\n - Date suffixes like '_20250627_v7wlxg' are removed for matching"
-        summary += "\n - Resources are matched by their logical structure rather than exact string representation"
-    else:
-        summary = f"No differences found between {import_file_name} and {export_file_name}"
-    
-    # Save to file if requested
-    if save_to_file:
-        # Use only the date part (YYYYMMDD) without the time for overwriting files on the same day
-        date_only = datetime.now().strftime("%Y%m%d")
-        base_name = remove_date_suffix(os.path.splitext(import_file_name)[0])
-        output_file = os.path.join(Paths.COMPARISON_DIR, f"comparison_{base_name}_{date_only}.json")
-        
+        Returns:
+            dict: Normalized policy structure or None on error
+        """
         try:
-            # Save JSON result with clear formatting
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2)
+            with open(arm_file_path, 'r', encoding='utf-8') as f:
+                arm_data = json.load(f)
             
-            summary += f"\n\nComparison result saved to {output_file}"
-        except Exception as e:
-            logging.error(f"Failed to save comparison result: {str(e)}")
-            summary += f"\n\nFailed to save comparison result: {str(e)}"
-    
-    return summary
-
-def generate_arm_templates_from_bicep():
-    """
-    Generate ARM templates from all Bicep files in the bicep directory.
-    
-    This function should be called before comparing ARM templates to ensure
-    the exported ARM templates are up-to-date with the Bicep files.
-    
-    Returns:
-        tuple: (success, templates_dict) where:
-            - success (bool): True if all templates were generated successfully
-            - templates_dict (dict): A dictionary mapping Bicep filenames to generated ARM templates
-    """
-    logging.info("Generating ARM templates from Bicep files...")
-    
-    # Clean the ARM export directory first
-    logging.info("Cleaning ARM export directory before generating templates...")
-    if not clean_directory(Paths.ARM_EXPORT_DIR):
-        logging.error("Failed to clean ARM export directory")
-        return False, {}
-    
-    # Ensure ARM export directory exists (although clean_directory should create it if it doesn't exist)
-    os.makedirs(Paths.ARM_EXPORT_DIR, exist_ok=True)
-    
-    # Get all Bicep files
-    bicep_files = [f for f in os.listdir(Paths.BICEP_DIR) if f.endswith('.bicep')]
-    
-    if not bicep_files:
-        logging.warning("No Bicep files found in bicep directory")
-        return False, {}
-    
-    generated_templates = {}
-    success_count = 0
-    fail_count = 0
-    
-    for bicep_file in bicep_files:
-        bicep_path = os.path.join(Paths.BICEP_DIR, bicep_file)
-        
-        # Transpile Bicep to ARM template
-        success, arm_file_path = transpile_bicep_to_arm(bicep_path, Paths.ARM_EXPORT_DIR)
-        
-        if success:
-            generated_templates[bicep_file] = arm_file_path
-            success_count += 1
-        else:
-            logging.error(f"Failed to transpile Bicep file to ARM template: {bicep_file}")
-            fail_count += 1
-    
-    # Log summary of generation results
-    if fail_count == 0:
-        logging.info(f"Successfully generated all {success_count} ARM templates from Bicep files")
-        return True, generated_templates
-    else:
-        logging.error(f"Failed to generate {fail_count} of {len(bicep_files)} ARM templates from Bicep files")
-        return False, generated_templates
-
-def find_matching_templates():
-    """
-    Find matching ARM templates between import and export directories.
-    
-    Returns:
-        list: A list of tuples (import_file, export_file) for matching templates
-    """
-    matches = []
-    
-    # Get all JSON files in the import directory
-    import_files = [f for f in os.listdir(Paths.ARM_DIR) if f.endswith('.json')]
-    
-    # Get all JSON files in the export directory
-    export_files = [f for f in os.listdir(Paths.ARM_EXPORT_DIR) if f.endswith('.json')]
-    
-    # For each import file, find a matching export file
-    for import_file in import_files:
-        # Remove date suffix from import file name
-        base_name = remove_date_suffix(os.path.splitext(import_file)[0])
-        
-        # Look for a matching export file
-        for export_file in export_files:
-            export_base_name = os.path.splitext(export_file)[0]
+            resources = arm_data.get('resources', [])
+            if not resources:
+                logging.warning(f"No resources found in ARM template: {arm_file_path}")
+                return None
             
-            # If the base names match, add to matches
-            if base_name == export_base_name:
-                import_path = os.path.join(Paths.ARM_DIR, import_file)
-                export_path = os.path.join(Paths.ARM_EXPORT_DIR, export_file)
-                matches.append((import_path, export_path))
-                break
-    
-    return matches
-
-def extract_logical_resource_identifier(resource):
-    """
-    Extract a logical identifier for a resource that can be used for matching.
-    
-    This function creates a unique identifier based on the resource type and normalized name,
-    allowing resources to be matched regardless of how their names are formatted.
-    
-    Args:
-        resource (dict): A resource object
-        
-    Returns:
-        str: A logical identifier for the resource
-    """
-    if not isinstance(resource, dict) or 'type' not in resource or 'name' not in resource:
-        return None
-    
-    resource_type = resource['type']
-    resource_name = normalize_resource_name(resource['name'])
-    
-    # For rule collections, use just the last part
-    if resource_type == "Microsoft.Network/firewallPolicies/ruleCollectionGroups" and '/' in resource_name:
-        parts = resource_name.split('/')
-        return f"RCG:{parts[-1]}"
-        
-    # For main policy resources, standardize the name without date suffix
-    if resource_type == "Microsoft.Network/firewallPolicies":
-        return f"Policy:{resource_name.split('-')[0]}"
-        
-    # For other resource types, use type and full normalized name
-    return f"{resource_type}:{resource_name}"
-
-def extract_logical_resources(resources_list):
-    """
-    Extract logical resources from a list of resources.
-    
-    This function maps resources to their logical identifiers to enable matching
-    resources regardless of the string format used to represent their names.
-    
-    Args:
-        resources_list (list): A list of resource objects
-        
-    Returns:
-        dict: A dictionary mapping logical resource identifiers to their original objects
-    """
-    logical_resources = {}
-    
-    for resource in resources_list:
-        if isinstance(resource, dict):
-            # Get the logical identifier for this resource
-            logical_id = extract_logical_resource_identifier(resource)
-            if logical_id:
-                # Use the logical identifier as the key
-                logical_resources[logical_id] = resource
-    
-    return logical_resources
-
-def compare_resource_collections(import_resources, export_resources):
-    """
-    Compare collections of resources based on their logical identifiers.
-
-    This function matches resources by their logical identifiers (normalized) and
-    compares their content, categorizing differences as import_only, export_only,
-    or values_changed.
-
-    Args:
-        import_resources (list): List of resources from the import file
-        export_resources (list): List of resources from the export file
-
-    Returns:
-        dict: Dictionary with categorized differences
-    """
-    # Extract logical resource identifiers
-    import_logical = extract_logical_resources(import_resources)
-    export_logical = extract_logical_resources(export_resources)
-
-    # Find resources only in import
-    import_only_ids = set(import_logical.keys()) - set(export_logical.keys())
-    import_only = {name: import_logical[name] for name in import_only_ids}
-
-    # Fix the error in export_only_ids calculation
-    export_only_ids = set(export_logical.keys()) - set(import_logical.keys())
-    export_only = {name: export_logical[name] for name in export_only_ids}
-
-    # Find resources in both but with differences
-    common_ids = set(import_logical.keys()) & set(export_logical.keys())
-    values_changed = {}
-    
-    # Helper function to parse DeepDiff path strings like root['a'][0]['b'] with meaningful names
-    def parse_path_with_names(path_str, obj):
-        tokens = re.findall(r"\['([^']+)\']|\[(\d+)\]", path_str)
-        result = []
-        current_obj = obj
-
-        for i, (k, idx) in enumerate(tokens):
-            if k:
-                result.append(k)
-                if isinstance(current_obj, dict):
-                    current_obj = current_obj.get(k, {})
-            else:
-                idx = int(idx)
-                if isinstance(current_obj, list) and idx < len(current_obj):
-                    if 'name' in current_obj[idx]:
-                        name = current_obj[idx]['name']
-                        result.append(name)
-                        
-                        # Track the current object context
-                        if i > 0 and result[-2] in ['ruleCollections', 'rules']:
-                            current_obj = current_obj[idx]
-                        else:
-                            current_obj = current_obj[idx]
-                    else:
-                        result.append(idx)
-                        current_obj = current_obj[idx]
+            # Find the policy resource
+            policy = None
+            for resource in resources:
+                if resource.get('type') == 'Microsoft.Network/firewallPolicies':
+                    policy = resource
+                    break
+            
+            if not policy:
+                logging.error(f"No firewall policy found in ARM template: {arm_file_path}")
+                return None
+            
+            # Extract policy properties
+            policy_name = policy.get('name', '')
+            policy_props = policy.get('properties', {})
+            
+            # Find all rule collection groups
+            rcg_resources = []
+            for resource in resources:
+                if resource.get('type') == 'Microsoft.Network/firewallPolicies/ruleCollectionGroups':
+                    rcg_resources.append(resource)
+            
+            # Normalize rule collection groups
+            normalized_rcgs = []
+            for rcg in rcg_resources:
+                # Parse RCG name (format: "PolicyName/RCGName" or just "RCGName")
+                rcg_full_name = rcg.get('name', '')
+                if '/' in rcg_full_name:
+                    rcg_prefixed_name = rcg_full_name.split('/')[-1]
                 else:
-                    result.append(idx)
-                    
-
-        return result
-        
-    # Function to convert a parsed path back to a DeepDiff-style path string
-    def path_to_string(path_parts):
-        result = "root"
-        for part in path_parts:
-            if isinstance(part, int):
-                result += f"[{part}]"
-            else:
-                result += f"['{part}']"
-        return result
-
-    # Helper function to extract minimal diff structure
-    def extract_minimal_diff(import_obj, export_obj, diff_dict):
-        """
-        Given two objects and a DeepDiff diff dict, extract only the changed keys and their parent structure.
-        Returns a tuple: (import_minimal, export_minimal)
-        """
-        def set_nested(d, path, value):
-            for key in path[:-1]:
-                if isinstance(key, int):
-                    if not isinstance(d, list):
-                        logging.warning(f"Expected list at path {path}, but found {type(d).__name__}. Skipping.")
-                        return
-                    while len(d) <= key:
-                        d.append({})
-                    d = d[key]
-                else:
-                    if not isinstance(d, dict):
-                        logging.warning(f"Expected dict at path {path}, but found {type(d).__name__}. Skipping.")
-                        return
-                    if key not in d:
-                        d[key] = {} if not isinstance(path[-1], int) else []
-                    d = d[key]
-            if isinstance(path[-1], int):
-                if not isinstance(d, list):
-                    logging.warning(f"Expected list at path {path}, but found {type(d).__name__}. Skipping.")
-                    return
-                while len(d) <= path[-1]:
-                    d.append({})
-                d[path[-1]] = value
-            else:
-                if not isinstance(d, dict):
-                    logging.warning(f"Expected dict at path {path}, but found {type(d).__name__}. Skipping.")
-                    return
-                d[path[-1]] = value
-
-        def get_by_path(obj, path):
-            """Retrieve a value from a nested object using a list of keys/indices."""
-            for p in path:
-                if isinstance(obj, list) and isinstance(p, int):
-                    if p < len(obj):
-                        obj = obj[p]
-                    else:
-                        return None
-                elif isinstance(obj, dict) and p in obj:
-                    obj = obj[p]
-                else:
-                    return None
-            return obj
-
-        import_minimal = {}
-        export_minimal = {}
-
-        # Handle changed values
-        for k, v in diff_dict.get('values_changed', {}).items():
-            path = parse_path_with_names(k, import_obj)
-            old_value = v.get('old_value')
-            new_value = v.get('new_value')
-            set_nested(import_minimal, path, old_value)
-            set_nested(export_minimal, path, new_value)
-
-        # Handle added/removed dictionary items
-        for k, v in diff_dict.get('dictionary_item_added', {}).items():
-            path = parse_path_with_names(k, export_obj)
-            export_val = get_by_path(export_obj, path)
-            set_nested(export_minimal, path, export_val)
-            
-        for k, v in diff_dict.get('dictionary_item_removed', {}).items():
-            path = parse_path_with_names(k, import_obj)
-            import_val = get_by_path(import_obj, path)
-            set_nested(import_minimal, path, import_val)
-
-        # Handle added/removed iterable items
-        for k, v in diff_dict.get('iterable_item_added', {}).items():
-            path = parse_path_with_names(k, export_obj)
-            set_nested(export_minimal, path, v)
-            
-        for k, v in diff_dict.get('iterable_item_removed', {}).items():
-            path = parse_path_with_names(k, import_obj)
-            set_nested(import_minimal, path, v)
-
-        return import_minimal, export_minimal
-
-    for res_id in common_ids:
-        import_resource = normalize_resource_names_in_json(dict(import_logical[res_id]))
-        export_resource = normalize_resource_names_in_json(dict(export_logical[res_id]))
-
-        # Remove ignored keys (e.g., `dependsOn`)
-        keys_to_ignore = {"dependsOn"}
-        import_resource = remove_ignored_keys(import_resource, keys_to_ignore)
-        export_resource = remove_ignored_keys(export_resource, keys_to_ignore)
-
-        import_resource = handle_empty_and_missing(import_resource)
-        export_resource = handle_empty_and_missing(export_resource)
-
-        diff = DeepDiff(import_resource, export_resource, 
-                       ignore_order=True, 
-                       report_repetition=True,
-                       verbose_level=2)
-
-        if diff:
-            import_minimal, export_minimal = extract_minimal_diff(import_resource, export_resource, diff.to_dict())
-            import_name = import_logical[res_id].get('name', res_id)
-            export_name = export_logical[res_id].get('name', res_id)
-            
-            # Process the diff to use rule collection and rule names instead of indices
-            processed_diff = {}
-            
-            for diff_type, diff_items in diff.to_dict().items():
-                processed_diff[diff_type] = {}
+                    rcg_prefixed_name = rcg_full_name
                 
-                for path, value in diff_items.items():
-                    if diff_type == 'values_changed':
-                        parsed_path = parse_path_with_names(path, import_resource)
-                        new_path = path_to_string(parsed_path)
-                        processed_diff[diff_type][new_path] = value
-                        
-                        # Fix the minimal diff with the actual values from the diff
-                        old_value = value.get('old_value')
-                        new_value = value.get('new_value')
-                        
-                        # Apply to import_minimal
-                        obj = import_minimal
-                        i = -1  # Initialize i before the loop
-                        for i, p in enumerate(parsed_path[:-1]):
-                            if isinstance(p, int) and isinstance(obj, list) and p < len(obj):
-                                obj = obj[p]
-                            elif isinstance(p, str) and isinstance(obj, dict) and p in obj:
-                                obj = obj[p]
-                            else:
-                                break
-                        # Only check if i has reached the expected position in the path
-                        if i >= 0 and i == len(parsed_path) - 2 and parsed_path[-1] in obj:
-                            obj[parsed_path[-1]] = old_value
-                            
-                        # Apply to export_minimal
-                        obj = export_minimal
-                        i = -1  # Initialize i before the loop
-                        for i, p in enumerate(parsed_path[:-1]):
-                            if isinstance(p, int) and isinstance(obj, list) and p < len(obj):
-                                obj = obj[p]
-                            elif isinstance(p, str) and isinstance(obj, dict) and p in obj:
-                                obj = obj[p]
-                            else:
-                                break
-                        # Only check if i has reached the expected position in the path
-                        if i >= 0 and i == len(parsed_path) - 2 and parsed_path[-1] in obj:
-                            obj[parsed_path[-1]] = new_value
-                        
-                    elif diff_type in ['dictionary_item_added', 'iterable_item_added']:
-                        parsed_path = parse_path_with_names(path, export_resource)
-                        new_path = path_to_string(parsed_path)
-                        processed_diff[diff_type][new_path] = value
-                    elif diff_type in ['dictionary_item_removed', 'iterable_item_removed']:
-                        parsed_path = parse_path_with_names(path, import_resource)
-                        new_path = path_to_string(parsed_path)
-                        processed_diff[diff_type][new_path] = value
-                    else:
-                        processed_diff[diff_type][path] = value
+                # Strip priority prefix to get actual name for comparison
+                rcg_priority_from_name, rcg_name = CommonData.parse_priority_name(rcg_prefixed_name)
+                
+                rcg_props = rcg.get('properties', {})
+                rcg_priority = rcg_props.get('priority', rcg_priority_from_name)
+                
+                # Normalize rule collections
+                normalized_rcs = []
+                for rc in rcg_props.get('ruleCollections', []):
+                    rc_prefixed_name = rc.get('name', '')
+                    
+                    # Strip priority prefix to get actual name for comparison
+                    rc_priority_from_name, rc_name = CommonData.parse_priority_name(rc_prefixed_name)
+                    
+                    rc_priority = rc.get('priority', rc_priority_from_name)
+                    rc_type = rc.get('ruleCollectionType', '')
+                    
+                    # Normalize rules using canonical format
+                    normalized_rules = []
+                    for rule in rc.get('rules', []):
+                        normalized_rules.append(normalize_rule(rule))
+                    
+                    normalized_rcs.append({
+                        'name': rc_name,
+                        'priority': rc_priority,
+                        'ruleCollectionType': rc_type,
+                        'rules': normalized_rules
+                    })
+                
+                normalized_rcgs.append({
+                    'name': rcg_name,
+                    'priority': rcg_priority,
+                    'ruleCollections': normalized_rcs
+                })
             
-            values_changed[res_id] = {
-                "import": {
-                    "name": import_name,
-                    "content": import_minimal
-                },
-                "export": {
-                    "name": export_name,
-                    "content": export_minimal
-                },
-                "diff": processed_diff
+            # Return normalized structure
+            return {
+                'name': policy_name,
+                'properties': policy_props,
+                'ruleCollectionGroups': normalized_rcgs
             }
+            
+        except Exception as e:
+            logging.error(f"Error normalizing ARM template {arm_file_path}: {e}", exc_info=True)
+            return None
 
-    return {
-        "import_only": import_only,
-        "export_only": export_only,
-        "values_changed": values_changed
-    }
+    @staticmethod
+    def load_policy_from_yaml(policy_dir):
+        """
+        Load policy from YAML directory structure and normalize.
+        
+        Reads:
+          policies/yaml/POLICY_NAME/
+            ├── main.yaml
+            ├── 15000_RCG_NAME/
+            │   ├── main.yaml
+            │   ├── 200_RC_NAME.yaml
+        
+        Args:
+            policy_dir (str): Path to policy YAML directory
+            
+        Returns:
+            dict: Normalized policy structure or None on error
+        """
+        try:
+            if not os.path.exists(policy_dir):
+                logging.error(f"Policy directory not found: {policy_dir}")
+                return None
+            
+            # Load main policy file
+            main_policy_file = os.path.join(policy_dir, 'main.yaml')
+            if not os.path.exists(main_policy_file):
+                logging.error(f"Main policy file not found: {main_policy_file}")
+                return None
+            
+            with open(main_policy_file, 'r', encoding='utf-8') as f:
+                policy_data = yaml.safe_load(f)
+            
+            policy_name = policy_data.get('name', os.path.basename(policy_dir))
+            policy_props = policy_data.get('properties', {})
+            
+            # Find all RCG directories
+            normalized_rcgs = []
+            for item in os.listdir(policy_dir):
+                item_path = os.path.join(policy_dir, item)
+                if not os.path.isdir(item_path):
+                    continue
+                
+                # Parse priority from folder name
+                rcg_priority, rcg_name = CommonData.parse_priority_name(item)
+                
+                # Load RCG main.yaml
+                rcg_main_file = os.path.join(item_path, 'main.yaml')
+                if not os.path.exists(rcg_main_file):
+                    logging.warning(f"RCG main.yaml not found: {rcg_main_file}")
+                    continue
+                
+                with open(rcg_main_file, 'r', encoding='utf-8') as f:
+                    rcg_data = yaml.safe_load(f)
+                
+                # Override priority if specified in YAML
+                if 'priority' in rcg_data:
+                    rcg_priority = rcg_data['priority']
+                
+                # Load all RC files
+                normalized_rcs = []
+                for rc_file in os.listdir(item_path):
+                    if not rc_file.endswith('.yaml') or rc_file == 'main.yaml':
+                        continue
+                    
+                    rc_file_path = os.path.join(item_path, rc_file)
+                    rc_priority, rc_name = CommonData.parse_priority_name(os.path.splitext(rc_file)[0])
+                    
+                    with open(rc_file_path, 'r', encoding='utf-8') as f:
+                        rc_data = yaml.safe_load(f)
+                    
+                    # Override priority if specified in YAML
+                    if 'priority' in rc_data:
+                        rc_priority = rc_data['priority']
+                    
+                    # Normalize rules using canonical format
+                    normalized_rules = []
+                    for rule in rc_data.get('rules', []):
+                        normalized_rules.append(normalize_rule(rule))
+                    
+                    normalized_rcs.append({
+                        'name': rc_name,
+                        'priority': rc_priority,
+                        'ruleCollectionType': rc_data.get('ruleCollectionType', ''),
+                        'rules': normalized_rules
+                    })
+                
+                normalized_rcgs.append({
+                    'name': rcg_name,
+                    'priority': rcg_priority,
+                    'ruleCollections': normalized_rcs
+                })
+            
+            return {
+                'name': policy_name,
+                'properties': policy_props,
+                'ruleCollectionGroups': normalized_rcgs
+            }
+            
+        except Exception as e:
+            logging.error(f"Error loading policy from YAML {policy_dir}: {e}", exc_info=True)
+            return None
 
-def handle_empty_and_missing(data):
-    """
-    Handle empty arrays, missing keys, and sort lists for comparison.
+    @staticmethod
+    def compare_policies(local_policy, azure_policy):
+        """
+        Compare local vs Azure policies with identity-based matching.
+        
+        Matching strategy:
+        - RCGs matched by actual_name (not priority-prefixed name)
+        - RCs matched by actual_name within RCG
+        - Rules matched by name within RC
+        
+        Args:
+            local_policy (dict): Normalized local policy structure
+            azure_policy (dict): Normalized Azure policy structure
+            
+        Returns:
+            dict: Comparison results with added/deleted/modified items
+        """
+        if not local_policy or not azure_policy:
+            return None
+        
+        result = {
+            'policy_name': local_policy.get('name', 'Unknown'),
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'summary': {'added': 0, 'modified': 0, 'deleted': 0},
+            'rcg_added': [],
+            'rcg_deleted': [],
+            'rcg_modified': []
+        }
+        
+        # Build RCG lookup dicts by actual name
+        local_rcgs = {rcg['name']: rcg for rcg in local_policy.get('ruleCollectionGroups', [])}
+        azure_rcgs = {rcg['name']: rcg for rcg in azure_policy.get('ruleCollectionGroups', [])}
+        
+        # Find added RCGs (in local but not in Azure - will be added when deployed)
+        for rcg_name, rcg in local_rcgs.items():
+            if rcg_name not in azure_rcgs:
+                result['rcg_added'].append({
+                    'name': rcg_name,
+                    'priority': rcg.get('priority'),
+                    'ruleCollections': len(rcg.get('ruleCollections', []))
+                })
+                result['summary']['added'] += 1
+        
+        # Find deleted RCGs (in Azure but not in local - will be deleted when deployed)
+        for rcg_name, rcg in azure_rcgs.items():
+            if rcg_name not in local_rcgs:
+                result['rcg_deleted'].append({
+                    'name': rcg_name,
+                    'priority': rcg.get('priority'),
+                    'ruleCollections': len(rcg.get('ruleCollections', []))
+                })
+                result['summary']['deleted'] += 1
+        
+        # Find modified RCGs (in both)
+        for rcg_name in set(local_rcgs.keys()) & set(azure_rcgs.keys()):
+            local_rcg = local_rcgs[rcg_name]
+            azure_rcg = azure_rcgs[rcg_name]
+            
+            rcg_diff = {
+                'name': rcg_name,
+                'priority_changed': None,
+                'rc_added': [],
+                'rc_deleted': [],
+                'rc_modified': []
+            }
+            
+            # Check priority change
+            local_priority = local_rcg.get('priority')
+            azure_priority = azure_rcg.get('priority')
+            if local_priority != azure_priority:
+                rcg_diff['priority_changed'] = {
+                    'from': azure_priority,
+                    'to': local_priority
+                }
+            
+            # Compare rule collections
+            local_rcs = {rc['name']: rc for rc in local_rcg.get('ruleCollections', [])}
+            azure_rcs = {rc['name']: rc for rc in azure_rcg.get('ruleCollections', [])}
+            
+            # Added RCs (in local but not in Azure)
+            for rc_name in set(local_rcs.keys()) - set(azure_rcs.keys()):
+                rc = local_rcs[rc_name]
+                rcg_diff['rc_added'].append({
+                    'name': rc_name,
+                    'priority': rc.get('priority'),
+                    'rules': len(rc.get('rules', []))
+                })
+            
+            # Deleted RCs (in Azure but not in local)
+            for rc_name in set(azure_rcs.keys()) - set(local_rcs.keys()):
+                rc = azure_rcs[rc_name]
+                rcg_diff['rc_deleted'].append({
+                    'name': rc_name,
+                    'priority': rc.get('priority'),
+                    'rules': len(rc.get('rules', []))
+                })
+            
+            # Modified RCs
+            for rc_name in set(local_rcs.keys()) & set(azure_rcs.keys()):
+                local_rc = local_rcs[rc_name]
+                azure_rc = azure_rcs[rc_name]
+                
+                rc_diff = {
+                    'name': rc_name,
+                    'priority': local_rc.get('priority'),
+                    'rule_changes': [],
+                    'rules_added': [],
+                    'rules_deleted': []
+                }
+                
+                # Check priority change
+                if local_rc.get('priority') != azure_rc.get('priority'):
+                    rc_diff['priority_changed'] = {
+                        'from': azure_rc.get('priority'),
+                        'to': local_rc.get('priority')
+                    }
+                
+                # Compare rules by name
+                local_rules = {r['name']: r for r in local_rc.get('rules', [])}
+                azure_rules = {r['name']: r for r in azure_rc.get('rules', [])}
+                
+                # Rules added (in local but not in Azure)
+                for rule_name in set(local_rules.keys()) - set(azure_rules.keys()):
+                    rc_diff['rules_added'].append(rule_name)
+                
+                # Rules deleted (in Azure but not in local)
+                for rule_name in set(azure_rules.keys()) - set(local_rules.keys()):
+                    rc_diff['rules_deleted'].append(rule_name)
+                
+                # Modified rules - compare field by field
+                for rule_name in set(local_rules.keys()) & set(azure_rules.keys()):
+                    local_rule = local_rules[rule_name]
+                    azure_rule = azure_rules[rule_name]
+                    
+                    # Use field-by-field comparison
+                    differences = compare_rules(azure_rule, local_rule)
+                    
+                    if differences:
+                        for diff in differences:
+                            rc_diff['rule_changes'].append({
+                                'change_type': 'Modified',
+                                'rule_name': rule_name,
+                                'field': diff['field'],
+                                'before': str(diff['azure_value']),
+                                'after': str(diff['local_value'])
+                            })
+                
+                # Only add to modified list if there are actual changes
+                has_changes = (
+                    rc_diff.get('priority_changed') or 
+                    rc_diff['rule_changes'] or 
+                    rc_diff['rules_added'] or 
+                    rc_diff['rules_deleted']
+                )
+                if has_changes:
+                    rcg_diff['rc_modified'].append(rc_diff)
+            
+            # Only add to modified if there are actual changes
+            if (rcg_diff['priority_changed'] or rcg_diff['rc_added'] or 
+                rcg_diff['rc_deleted'] or rcg_diff['rc_modified']):
+                result['rcg_modified'].append(rcg_diff)
+                result['summary']['modified'] += 1
+        
+        return result
 
-    Args:
-        data: The data to process
+    @staticmethod
+    def generate_comparison_report(comparison_result, output_file):
+        """
+        Generate Markdown comparison report from comparison results.
+        
+        Args:
+            comparison_result (dict): Result from compare_policies()
+            output_file (str): Path to output MD file
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Load Jinja template
+            template_dir = Paths.TEMPLATES_DIR
+            env = Environment(loader=FileSystemLoader(template_dir))
+            template = env.get_template('comparison.md.jinja2')
+            
+            # Render template
+            content = template.render(**comparison_result)
+            
+            # Write to file
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            logging.info(f"Comparison report saved to: {output_file}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error generating comparison report: {e}", exc_info=True)
+            return False
 
-    Returns:
-        Processed data with empty arrays/missing keys handled and lists sorted
-    """
-    if isinstance(data, list):
-        # For lists of dictionaries, sort them by 'name' key if available
-        if all(isinstance(item, dict) for item in data) and all('name' in item for item in data):
-            return sorted(data, key=lambda x: x['name'])
-        return sorted(data) if all(isinstance(item, (str, int, float, bool)) for item in data) else data
-    elif isinstance(data, dict):
-        return {k: handle_empty_and_missing(v) for k, v in sorted(data.items())}
-    elif data is None:
-        return []  # Treat None as an empty list
-    return data
 
-def remove_ignored_keys(data, keys_to_ignore):
-    """
-    Recursively remove specified keys from a dictionary or list.
-
-    Args:
-        data: The data to process (dict or list).
-        keys_to_ignore: A set of keys to remove.
-
-    Returns:
-        The data with specified keys removed.
-    """
-    if isinstance(data, dict):
-        return {k: remove_ignored_keys(v, keys_to_ignore) for k, v in data.items() if k not in keys_to_ignore}
-    elif isinstance(data, list):
-        return [remove_ignored_keys(item, keys_to_ignore) for item in data]
-    return data

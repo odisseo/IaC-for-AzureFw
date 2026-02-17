@@ -1,0 +1,49 @@
+- firewallName: TestEW1P-VNET00-GLOBAL
+  regionName: westeurope
+  regionType: Prod
+  firewallType: ""
+  firewallResourceGroup:
+  firewallSubscriptionId:
+  fwPip:
+    0: [aba, 52.134.211.204]
+    1: [abc, 44.134.148.49]
+  natGwName: ""
+  natGwPipName: ""
+  natGwPipValue:
+  policiesName:
+    0: POLICY_P01
+  policiesResourceGroup:
+  policiesSubscriptionId: 
+  ipGroupsResourceGroup: 
+  ipGroupssubscriptionId: 
+  basePolicyName:
+  basePolicySubscription: 
+  basePolicyRG:
+  eventHub: ""
+  scope:
+  tenantId: 
+
+- firewallName: TestEN1P-VNET00-GLOBAL
+  regionName: nortdeurope
+  regionType: DR
+  firewallType: ""
+  firewallResourceGroup:
+  firewallSubscriptionId:
+  fwPip:
+    0: [bba, 82.114.177.111]
+    1: [bbc, 4.24.128.30]
+  natGwName: ""
+  natGwPipName: ""
+  natGwPipValue:
+  policiesName:
+    0: POLICY_NE_P01
+  policiesResourceGroup:
+  policiesSubscriptionId: 
+  ipGroupsResourceGroup: 
+  ipGroupssubscriptionId: 
+  basePolicyName:
+  basePolicySubscription: 
+  basePolicyRG:
+  eventHub: ""
+  scope:
+  tenantId: 

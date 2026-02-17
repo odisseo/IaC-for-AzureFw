@@ -2,6 +2,7 @@ IaC/
 dist/
 build/
 env/
+venv/
 *.spec
 # docs/*
 # _csv/*.csv
@@ -9,4 +10,6 @@ env/
 # _policies/*.yaml
 # bicep/*.bicep
 scripts/libraries/__pycache__/*
+scripts/libraries_common/__pycache__/*
 # requirements.txt
+*.exe

@@ -7,18 +7,24 @@
 {# Import macros from external file #}
 {% import '_macros.jinja2' as fw_macros %}
 
+{# Generate workspace variables for log analytics resources if needed #}
+{%- if policy_data.get("insights") and policy_data["insights"].get("logAnalyticsResources") and policy_data["insights"]["logAnalyticsResources"].get("defaultWorkspaceId") and policy_data["insights"]["logAnalyticsResources"]["defaultWorkspaceId"].get("id") %}
+{%- set workspace_id = policy_data["insights"]["logAnalyticsResources"]["defaultWorkspaceId"]["id"] %}
+{%- set workspace_name = workspace_id.split('/')[-1] | replace('-', '_') %}
+var workspaces_{{ workspace_name }}_externalid = '{{ workspace_id }}'
+{%- endif %}
+
 {# Generate Firewall Policy resources #}
-{%- for policy_name, policy_data in policies.items() -%}
-{%- set policy_name_with_date = policy_name -%}
-{%- set policy_resource_name = policy_name_with_date | replace('-', '_') | replace('.', '_') -%}
-resource {{ policy_resource_name }} 'Microsoft.Network/firewallPolicies@{{ api_version }}' = {
-  name: '{{ policy_name_with_date }}'
+{%- set policy_name_with_suffix = policy_data.get("policy_name_with_suffix", "UNKNOWN_POLICY") -%}
+{%- set policy_resource_id = policy_name_with_suffix | replace('-', '_') | replace('.', '_') -%}
+resource {{ policy_resource_id }} 'Microsoft.Network/firewallPolicies@{{ api_version }}' = {
+  name: '{{ policy_resource_id }}'
   location: '{{ regionName }}'
-  tags: {
-    scope: 'Azure Firewall Enviroment'
-    team: 'Network'
-    Role: 'Network management'
-  }
+  tags: {%- if policy_data.get("tags") %} {
+    {%- for tag_key, tag_value in policy_data["tags"].items() %}
+    {{ tag_key }}: '{{ tag_value }}'
+    {%- endfor %}
+  }{%- else %} []{% endif %}
   properties: {
     sku: {
       tier: 'Premium'
@@ -30,32 +36,92 @@ resource {{ policy_resource_name }} 'Microsoft.Network/firewallPolicies@{{ api_v
     dnsSettings: {
       servers: []
       enableProxy: true
-    }{%- if policy_data["basePolicy"] %}
+    }
+    {%- if "snat" in policy_data %}
+    {%- set has_snat_content = (policy_data["snat"] and (policy_data["snat"].get("privateRanges") is not none or policy_data["snat"].get("autoLearnPrivateRanges"))) %}
+    {%- if has_snat_content %}
+    snat: {
+      {%- if policy_data["snat"].get("privateRanges") is not none %}
+      privateRanges: [
+        {%- if policy_data["snat"]["privateRanges"] %}
+        {%- for ip_range in policy_data["snat"]["privateRanges"] %}
+        '{{ ip_range }}'
+        {%- endfor %}
+        {%- endif %}
+      ]
+      {%- endif %}
+      {%- if policy_data["snat"].get("autoLearnPrivateRanges") %}
+      autoLearnPrivateRanges: '{{ policy_data["snat"]["autoLearnPrivateRanges"] }}'
+      {%- endif %}
+    }
+    {%- else %}
+    snat: {}
+    {%- endif %}
+    {%- endif %}
+    {%- if policy_data["insights"] %}
+    insights: {
+      {%- if policy_data["insights"].get("enabled") is not none %}
+      isEnabled: {{ policy_data["insights"]["enabled"] | lower }}
+      {%- elif policy_data["insights"].get("isEnabled") is not none %}
+      isEnabled: {{ policy_data["insights"]["isEnabled"] | lower }}
+      {%- else %}
+      isEnabled: false
+      {%- endif %}
+      retentionDays: {{ policy_data["insights"].get("retentionDays", 365) }}
+      {%- if policy_data["insights"].get("defaultWorkspaceId") %}
+      logAnalyticsResources: {
+        workspaces: []
+        defaultWorkspaceId: {
+          id: '{{ policy_data["insights"]["defaultWorkspaceId"] }}'
+        }
+      }
+      {%- elif policy_data["insights"].get("logAnalyticsResources") %}
+      logAnalyticsResources: {
+        workspaces: []
+        {%- if policy_data["insights"]["logAnalyticsResources"].get("defaultWorkspaceId") and policy_data["insights"]["logAnalyticsResources"]["defaultWorkspaceId"].get("id") %}
+        defaultWorkspaceId: {
+          id: workspaces_{{ policy_data["insights"]["logAnalyticsResources"]["defaultWorkspaceId"]["id"].split('/')[-1] | replace('-', '_') }}_externalid
+        }
+        {%- endif %}
+      }
+      {%- endif %}
+    }
+    {%- endif %}
+    {%- if policy_data["basePolicy"] %}
     basePolicy: {
-      {%- set firewallPolicyResourceId = "/subscriptions/" + subscriptionid + "/resourceGroups/" + policiesrg + "/providers/Microsoft.Network/firewallPolicies/" + policy_data["basePolicy"] + "-" + policy_data["date_suffix"] %}
+      {%- if policy_data["basePolicy"] is mapping %}
+      id: '{{ policy_data["basePolicy"]["id"] }}'
+      {%- else %}
+      {%- set firewallPolicyResourceId = "/subscriptions/" + parentpolicysubscriptionid + "/resourceGroups/" + parentpolicyresourcegroup + "/providers/Microsoft.Network/firewallPolicies/" + policy_data["basePolicy"] %}
       id: '{{ firewallPolicyResourceId }}'
+      {%- endif %}
     }{%- endif %}
   }
-  {% set dependsOn = [] -%}
+  {%- set dependsOn = [] -%}
   {%- if policy_data["basePolicy"] -%}
-    {%- set _ = dependsOn.append(policy_data["basePolicy"] | replace('-', '_') | replace('.', '_')) -%}
+    {%- if policy_data["basePolicy"] is mapping -%}
+      {%- set basePolicyName = policy_data["basePolicy"]["id"].split('/')[-1] -%}
+      {%- set _ = dependsOn.append(basePolicyName | replace('-', '_') | replace('.', '_')) -%}
+    {%- else -%}
+      {%- set _ = dependsOn.append(policy_data["basePolicy"] | replace('-', '_') | replace('.', '_')) -%}
+    {%- endif -%}
   {%- endif -%}
-  dependsOn: {{ fw_macros.render_resource_array_dependson(dependsOn) }}
+  {#dependsOn: {{ fw_macros.render_resource_array_dependson(dependsOn) }} #}
 }
 
 {# Generate Rule Collection Group resources #}
 {%- for rcg_index in range(policy_data["rcg_order"] | length) -%}
 {%- set rcg_name = policy_data["rcg_order"][rcg_index] -%}
 {%- set rcg_data = policy_data["rcgs"][rcg_name] -%}
-{%- set rcg_resource_name = policy_resource_name + '_' + rcg_name | replace('-', '_') | replace('.', '_') -%}
+{%- set rcg_resource_name = policy_resource_id + '_' + rcg_name | replace('-', '_') | replace('.', '_') -%}
 resource {{ rcg_resource_name }} 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@{{ api_version }}' = {
-  parent: {{ policy_resource_name }}
+  parent: {{ policy_resource_id }}
   name: '{{ rcg_name }}'
   location: '{{ regionName }}'
-  {% set dependsOn = [policy_resource_name] -%}
+  {% set dependsOn = [policy_resource_id] -%}
   {%- if rcg_index > 0 -%}
     {%- set prev_rcg_name = policy_data["rcg_order"][rcg_index - 1] -%}
-    {%- set prev_rcg_resource = policy_resource_name + '_' + prev_rcg_name | replace('-', '_') | replace('.', '_') -%}
+    {%- set prev_rcg_resource = policy_resource_id + '_' + prev_rcg_name | replace('-', '_') | replace('.', '_') -%}
     {%- set _ = dependsOn.append(prev_rcg_resource) -%}
   {%- endif -%}
   dependsOn: {{ fw_macros.render_resource_array_dependson(dependsOn) }}
@@ -87,7 +153,6 @@ resource {{ rcg_resource_name }} 'Microsoft.Network/firewallPolicies/ruleCollect
             destinationFqdns: {{ fw_macros.render_array(rule["DestinationFqdns"]) }}
             destinationPorts: {{ fw_macros.render_array(rule["DestinationPorts"]) }}
             {%- elif rule["RuleType"] == "NatRule" %}
-            {# NAT Rule specific properties #}
             {%- if rule.get("TranslatedAddress") %}
             translatedAddress: '{{ rule["TranslatedAddress"] }}'
             {%- endif %}
@@ -103,7 +168,7 @@ resource {{ rcg_resource_name }} 'Microsoft.Network/firewallPolicies/ruleCollect
             destinationAddresses: {{ fw_macros.render_array(rule["DestinationAddresses"]) }}
             destinationPorts: {{ fw_macros.render_array(rule["DestinationPorts"]) }}
             {%- elif rule["RuleType"] == "ApplicationRule" %}
-            {# Application Rule specific properties #}
+            {#- Application Rule specific properties #}
             protocols: {{ fw_macros.render_protocols_array(rule.get("Protocols", "")) }}
             fqdnTags: {{ fw_macros.render_array(rule.get("FqdnTags", "")) }}
             webCategories: {{ fw_macros.render_array(rule.get("WebCategories", "")) }}
@@ -126,4 +191,3 @@ resource {{ rcg_resource_name }} 'Microsoft.Network/firewallPolicies/ruleCollect
   }
 }
 {% endfor %}
-{%- endfor %}

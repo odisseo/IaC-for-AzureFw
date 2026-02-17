@@ -6,3 +6,4 @@ colorama
 parameters
 pyinstaller
 deepdiff>=6.2.0
+gitpython

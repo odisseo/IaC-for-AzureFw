@@ -1,0 +1,118 @@
+# Azure Firewall Policy Comparison Report
+
+**Policy**: {{ policy_name }}  
+**Generated**: {{ timestamp }}
+
+---
+
+## Summary
+
+| Status | Count |
+|--------|-------|
+| 🟢 Added | {{ summary.added }} |
+| 🔴 Deleted | {{ summary.deleted }} |
+| 🟡 Modified | {{ summary.modified }} |
+
+---
+{%- if rcg_added %}
+
+## 🟢 Added Rule Collection Groups
+
+The following RCGs will be **ADDED** when deployed to Azure:
+{%- for rcg in rcg_added %}
+
+### {{ rcg.name }}
+- **Priority**: {{ rcg.priority }}
+- **Rule Collections**: {{ rcg.ruleCollections }}
+{%- endfor %}
+{%- endif %}
+{%- if rcg_deleted %}
+
+## 🔴 Deleted Rule Collection Groups
+
+The following RCGs will be **DELETED** when deployed to Azure:
+{%- for rcg in rcg_deleted %}
+
+### {{ rcg.name }}
+- **Priority**: {{ rcg.priority }}
+- **Rule Collections**: {{ rcg.ruleCollections }}
+{%- endfor %}
+{%- endif %}
+{%- if rcg_modified %}
+
+## 🟡 Modified Rule Collection Groups
+
+The following RCGs have changes:
+{%- for rcg in rcg_modified %}
+
+### {{ rcg.name }}
+{%- if rcg.priority_changed %}
+**⚠️ Priority Changed**: {{ rcg.priority_changed.from }} → {{ rcg.priority_changed.to }}
+{%- endif %}
+{%- if rcg.rc_added %}
+
+#### 🟢 Added Rule Collections
+{%- for rc in rcg.rc_added %}
+- **{{ rc.name }}** (Priority: {{ rc.priority }}, Rules: {{ rc.rules }})
+{%- endfor %}
+{%- endif %}
+{%- if rcg.rc_deleted %}
+
+#### 🔴 Deleted Rule Collections
+{%- for rc in rcg.rc_deleted %}
+- **{{ rc.name }}** (Priority: {{ rc.priority }}, Rules: {{ rc.rules }})
+{%- endfor %}
+{%- endif %}
+{%- if rcg.rc_modified %}
+
+#### 🟡 Modified Rule Collections
+{%- for rc in rcg.rc_modified %}
+
+<details>
+<summary><strong>{{ rc.name }}</strong> (Priority: {{ rc.priority }})</summary>
+{%- if rc.priority_changed %}
+
+- **⚠️ Priority Changed**: {{ rc.priority_changed.from }} → {{ rc.priority_changed.to }}
+{%- endif %}
+{%- if rc.rules_added %}
+
+**🟢 Rules Added:**
+{%- for rule_name in rc.rules_added %}
+- `{{ rule_name }}`
+{%- endfor %}
+{%- endif %}
+{%- if rc.rules_deleted %}
+
+**🔴 Rules Deleted:**
+{%- for rule_name in rc.rules_deleted %}
+- `{{ rule_name }}`
+{%- endfor %}
+{%- endif %}
+{%- if rc.rule_changes %}
+
+**📝 Rule Modifications:**
+{%- for change in rc.rule_changes %}
+
+- **Rule:** `{{ change.rule_name }}`  
+  **Field:** `{{ change.field }}`  
+  **Before:** `{{ change.before[:200] }}{% if change.before|length > 200 %}...{% endif %}`  
+  **After:** `{{ change.after[:200] }}{% if change.after|length > 200 %}...{% endif %}`
+{%- endfor %}
+{%- endif %}
+
+</details>
+{%- endfor %}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+{%- if not rcg_added and not rcg_deleted and not rcg_modified %}
+
+## ✅ No Differences
+
+The local policy matches the Azure-deployed policy. No changes will occur on deployment.
+{%- endif %}
+
+---
+
+*This report compares local YAML policy configuration with Azure-deployed policy.*  
+*Changes shown represent what **will happen** when the local policy is deployed to Azure.*
